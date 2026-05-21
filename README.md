@@ -17,10 +17,14 @@ Skip any of them and you get a misleading CORS error, a Clerk 401, or a half-pro
 ## Install
 
 ```bash
-uv tool install --from ~/dev/projects/tools/wt wt
+uv tool install --from git+https://github.com/LeonY117/wt wt
 ```
 
-Now `wt` is on `$PATH`. Re-run after `git pull` to pick up code changes.
+Now `wt` is on `$PATH`. Re-run to upgrade to the latest commit. For local development, install from a clone instead:
+
+```bash
+uv tool install --from /path/to/wt wt
+```
 
 ## Use
 
