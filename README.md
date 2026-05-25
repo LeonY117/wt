@@ -69,6 +69,8 @@ tenant:                           # optional — enables --tenant flag and `wt t
 
 cleanup:
   protected: [demo-main]          # shorthands `wt rm` will refuse
+  gitignored_exclude:             # extends the built-in regenerable-junk list
+    - "mockups/.cache"            # surfaced by default; suppress per project
 
 import_hints:                     # used by `wt status` on first run only
   ports:
@@ -102,5 +104,6 @@ Per project at `~/.config/wt/<project>.json`. Source of truth for ports, DB name
 ## Safety semantics
 
 - **`wt rm` refuses** dirty / unpushed / unmerged worktrees, the primary worktree, and anything listed in `cleanup.protected`.
+- **`wt rm` surfaces gitignored content** before the y/N prompt — mockups, drafts, scratch notes the safety floor can't see. Known regenerable junk (`node_modules`, `.venv`, `.next`, `__pycache__`, `.DS_Store`, `.env*`, etc.) is filtered out; project-specific patterns extend the list via `cleanup.gitignored_exclude`.
 - **`wt new` rolls back** the worktree + DB if any later step fails.
 - **No `--force` anywhere.** Resolve the underlying issue rather than bypassing checks.

@@ -31,6 +31,11 @@ class TenantConfig(BaseModel):
 
 class CleanupConfig(BaseModel):
     protected: list[str] = Field(default_factory=list)
+    # Substrings (matched against each gitignored path) added to the built-in
+    # list of regenerable build-junk patterns that `wt rm` should *not*
+    # surface during its pre-removal gitignored-content sweep. Default list
+    # is in `commands.rm.DEFAULT_GITIGNORED_EXCLUDES`.
+    gitignored_exclude: list[str] = Field(default_factory=list)
 
 
 class ImportHint(BaseModel):

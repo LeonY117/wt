@@ -19,6 +19,24 @@ console = Console()
 err = Console(stderr=True)
 
 
+# Substrings of gitignored paths that `wt rm` should *not* surface during its
+# pre-removal sweep — known regenerable build junk and per-worktree env files.
+# Extend per-project via `cleanup.gitignored_exclude` in `.wt.yaml`.
+DEFAULT_GITIGNORED_EXCLUDES = (
+    "node_modules",
+    ".venv",
+    ".next",
+    ".turbo",
+    ".ruff_cache",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".DS_Store",
+    "tsbuildinfo",
+    ".env",  # also catches .env.local, .env.staging, etc.
+)
+
+
 @dataclass
 class WorktreeChecks:
     shorthand: str
@@ -125,6 +143,31 @@ def _check(project: Project, wt: Worktree) -> WorktreeChecks | None:
     return checks
 
 
+def _gitignored_content(path: Path, extra_excludes: list[str]) -> list[str]:
+    """List gitignored paths under `path` that aren't known regenerable junk.
+
+    `git status --ignored --short` reports gitignored entries with a `!!`
+    prefix. We filter out anything whose path contains a substring from the
+    built-in default list (build outputs, caches, .env files) or from the
+    project's `cleanup.gitignored_exclude`. What remains is content the user
+    probably wants to know about before we delete the worktree directory —
+    ad-hoc mockups, draft docs, scratch notes.
+    """
+    excludes = tuple(DEFAULT_GITIGNORED_EXCLUDES) + tuple(extra_excludes)
+    raw = _git_at(path, ["status", "--ignored", "--short"])
+    out: list[str] = []
+    for line in raw.splitlines():
+        if not line.startswith("!! "):
+            continue
+        entry = line[3:].strip()
+        if not entry:
+            continue
+        if any(token in entry for token in excludes):
+            continue
+        out.append(entry)
+    return out
+
+
 def _db_exists(name: str) -> bool:
     r = subprocess.run(["psql", "-lqt"], capture_output=True, text=True)
     if r.returncode != 0:
@@ -150,6 +193,25 @@ def _remove_one(
         drop_db = True
     elif wt.db:
         console.print(f"  database: [dim]{wt.db} (not present, will skip)[/dim]")
+
+    # Gitignored content the safety floor doesn't see — mockups, drafts, scratch
+    # notes — would be silently destroyed by `git worktree remove`. Surface the
+    # list so the caller can migrate (`mv`) anything they want to keep before
+    # confirming. Doesn't block removal; informational + included in the prompt
+    # context so a careless `y` after seeing the list is still the caller's
+    # call.
+    ignored = _gitignored_content(path, project.manifest.cleanup.gitignored_exclude)
+    if ignored:
+        console.print(
+            f"  [yellow]gitignored content ({len(ignored)} entr"
+            f"{'y' if len(ignored) == 1 else 'ies'}) — will be destroyed:[/yellow]"
+        )
+        for entry in ignored:
+            console.print(f"    [yellow]· {entry}[/yellow]")
+        console.print(
+            "  [dim]extend cleanup.gitignored_exclude in .wt.yaml to suppress "
+            "regenerable patterns.[/dim]"
+        )
 
     if not assume_yes:
         ans = input("proceed? [y/N] ").strip().lower()
