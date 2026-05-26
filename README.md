@@ -103,7 +103,7 @@ Per project at `~/.config/wt/<project>.json`. Source of truth for ports, DB name
 
 ## Safety semantics
 
-- **`wt rm` refuses** dirty / unpushed / unmerged worktrees, the primary worktree, and anything listed in `cleanup.protected`.
+- **`wt rm` refuses** dirty / unpushed worktrees, branches without a resolved (merged or closed) PR, the primary worktree, and anything listed in `cleanup.protected`. A closed-without-merge PR is treated as a deliberate decision — the prompt surfaces a warning so you can verify the work is preserved elsewhere before confirming.
 - **`wt rm` surfaces gitignored content** before the y/N prompt — mockups, drafts, scratch notes the safety floor can't see. Known regenerable junk (`node_modules`, `.venv`, `.next`, `__pycache__`, `.DS_Store`, `.env*`, etc.) is filtered out; project-specific patterns extend the list via `cleanup.gitignored_exclude`.
 - **`wt new` rolls back** the worktree + DB if any later step fails.
 - **No `--force` anywhere.** Resolve the underlying issue rather than bypassing checks.
