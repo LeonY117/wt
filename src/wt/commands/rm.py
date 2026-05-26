@@ -1,6 +1,9 @@
 """`wt rm` — safely tear down worktrees.
 
-Mirrors `scripts/cleanup-merged-worktrees`. Refuses anything unusual.
+A worktree is eligible when its branch has a most-recent PR that's MERGED
+or CLOSED (either is an explicit human decision), the working tree is
+clean, and the branch has no unpushed commits. Open PRs and never-PR'd
+branches are refused.
 """
 
 from __future__ import annotations
@@ -43,8 +46,9 @@ class WorktreeChecks:
     path: Path
     branch: str | None
     reasons: list[str] = field(default_factory=list)
-    merged_at: str | None = None
-    merged_sha: str | None = None
+    pr_state: str | None = None  # "MERGED" or "CLOSED"
+    pr_resolved_at: str | None = None  # mergedAt for MERGED, closedAt for CLOSED
+    merged_sha: str | None = None  # only set when pr_state == "MERGED"
 
 
 def _git_at(path: Path, args: list[str]) -> str:
@@ -56,8 +60,16 @@ def _git_at(path: Path, args: list[str]) -> str:
     return r.stdout if r.returncode == 0 else ""
 
 
-def _gh_merged_pr(branch: str) -> tuple[str | None, str | None]:
-    """Return (mergedAt, headRefOid) for the most recent merged PR for branch."""
+def _gh_latest_pr(branch: str) -> tuple[str | None, str | None, str | None]:
+    """Return (state, resolved_at, headRefOid) for the single most recent PR.
+
+    state is one of "OPEN", "MERGED", "CLOSED", or None when no PR exists.
+    resolved_at is mergedAt for MERGED, closedAt for CLOSED, otherwise None.
+
+    Looking at the *most recent* PR matters: a branch may have had an old
+    merged PR and then been reused for new work that's now open — that open
+    PR is the active state, and the worktree shouldn't be removed.
+    """
     r = subprocess.run(
         [
             "gh",
@@ -66,24 +78,35 @@ def _gh_merged_pr(branch: str) -> tuple[str | None, str | None]:
             "--head",
             branch,
             "--state",
-            "merged",
+            "all",
             "--limit",
             "1",
             "--json",
-            "mergedAt,headRefOid",
-            "--jq",
-            r'.[0] | "\(.mergedAt // "")|\(.headRefOid // "")"',
+            "state,mergedAt,closedAt,headRefOid",
         ],
         capture_output=True,
         text=True,
     )
     if r.returncode != 0:
-        return None, None
-    line = r.stdout.strip()
-    if not line or "|" not in line:
-        return None, None
-    merged_at, _, merged_sha = line.partition("|")
-    return (merged_at or None), (merged_sha or None)
+        return None, None, None
+    import json
+
+    try:
+        prs = json.loads(r.stdout or "[]")
+    except json.JSONDecodeError:
+        return None, None, None
+    if not prs:
+        return None, None, None
+    pr = prs[0]
+    state = pr.get("state")
+    head_sha = pr.get("headRefOid") or None
+    if state == "MERGED":
+        return "MERGED", pr.get("mergedAt") or None, head_sha
+    if state == "CLOSED":
+        return "CLOSED", pr.get("closedAt") or None, head_sha
+    if state == "OPEN":
+        return "OPEN", None, head_sha
+    return None, None, None
 
 
 def _check(project: Project, wt: Worktree) -> WorktreeChecks | None:
@@ -111,19 +134,31 @@ def _check(project: Project, wt: Worktree) -> WorktreeChecks | None:
         checks.reasons.append("detached HEAD — skipping")
         return checks
 
-    # Merged-PR check.
-    merged_at, merged_sha = _gh_merged_pr(wt.branch)
-    checks.merged_at = merged_at
-    checks.merged_sha = merged_sha
-    if not merged_at:
-        checks.reasons.append(f"no merged PR on remote for {wt.branch}")
-    else:
+    # PR-state check. A MERGED or CLOSED PR both count as a human decision
+    # that the branch is done — either is safe. An OPEN PR means active work.
+    # No PR at all means the work was never reviewed, so refuse.
+    state, resolved_at, head_sha = _gh_latest_pr(wt.branch)
+    checks.pr_state = state
+    checks.pr_resolved_at = resolved_at
+    if state == "MERGED":
+        checks.merged_sha = head_sha
+        # Catch the case where the branch was amended/force-pushed after the
+        # merge — local tip would then carry post-merge work we'd silently lose.
         local_sha = _git_at(path, ["rev-parse", "HEAD"]).strip()
-        if merged_sha and local_sha and local_sha != merged_sha:
+        if head_sha and local_sha and local_sha != head_sha:
             checks.reasons.append(
                 f"local tip {local_sha[:7]} differs from merged SHA "
-                f"{merged_sha[:7]} (amended/force-pushed since merge?)"
+                f"{head_sha[:7]} (amended/force-pushed since merge?)"
             )
+    elif state == "CLOSED":
+        # No SHA-match check: closed-without-merge has no canonical "final"
+        # SHA to compare against. The unpushed-commits check below still
+        # catches local-only work.
+        pass
+    elif state == "OPEN":
+        checks.reasons.append(f"open PR on remote for {wt.branch}")
+    else:
+        checks.reasons.append(f"no PR on remote for {wt.branch}")
 
     # Dirty / untracked.
     porcelain = _git_at(path, ["status", "--porcelain"]).strip()
@@ -179,7 +214,12 @@ def _db_exists(name: str) -> bool:
 
 
 def _remove_one(
-    project: Project, wt: Worktree, *, force: bool = False, assume_yes: bool = False
+    project: Project,
+    wt: Worktree,
+    checks: WorktreeChecks | None = None,
+    *,
+    force: bool = False,
+    assume_yes: bool = False,
 ) -> bool:
     """Remove a single worktree + its DB. Returns True on success."""
     path = Path(wt.path)
@@ -187,6 +227,12 @@ def _remove_one(
     console.print()
     console.print(f"[bold]about to remove:[/bold] {wt.shorthand}")
     console.print(f"  worktree: {path}")
+    if checks and checks.pr_state == "CLOSED":
+        when = f" ({checks.pr_resolved_at})" if checks.pr_resolved_at else ""
+        console.print(
+            f"  [yellow]PR was closed without merging{when} — verify the work is "
+            f"preserved elsewhere before confirming.[/yellow]"
+        )
     drop_db = False
     if wt.db and _db_exists(wt.db):
         console.print(f"  database: {wt.db} (will dropdb)")
@@ -276,7 +322,7 @@ def run_one(start: Path, shorthand: str, assume_yes: bool = False) -> int:
         )
         return 1
 
-    ok = _remove_one(project, wt, assume_yes=assume_yes)
+    ok = _remove_one(project, wt, checks, assume_yes=assume_yes)
     return 0 if ok else 1
 
 
@@ -285,7 +331,7 @@ def run_auto(start: Path) -> int:
     project = Project.discover(start)
 
     console.print("scanning worktrees…\n")
-    eligible: list[Worktree] = []
+    eligible: list[tuple[Worktree, WorktreeChecks]] = []
     for wt in project.registry.worktrees:
         if wt.shorthand == PRIMARY:
             console.print(f"  [dim]skip[/dim]  {wt.path}  [dim](primary)[/dim]")
@@ -301,11 +347,12 @@ def run_auto(start: Path) -> int:
             for r in checks.reasons:
                 console.print(f"         [yellow]↳ {r}[/yellow]")
         else:
+            verb = "merged" if checks.pr_state == "MERGED" else "closed without merge"
             console.print(
                 f"  [green] ok [/green]  {checks.path}  "
-                f"[dim](merged {checks.merged_at}, clean)[/dim]"
+                f"[dim]({verb} {checks.pr_resolved_at}, clean)[/dim]"
             )
-            eligible.append(wt)
+            eligible.append((wt, checks))
 
     console.print()
     if not eligible:
@@ -313,8 +360,8 @@ def run_auto(start: Path) -> int:
         return 0
     console.print(f"{len(eligible)} worktree(s) eligible for removal.")
 
-    for wt in eligible:
-        _remove_one(project, wt)
+    for wt, checks in eligible:
+        _remove_one(project, wt, checks)
 
     console.print()
     console.print("done.")
