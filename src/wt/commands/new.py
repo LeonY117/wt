@@ -10,7 +10,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from ..envfile import patch_env
+from ..envfile import patch_env, read_env
 from ..manifest import EnvPatch, Manifest
 from ..placeholders import build_context, render_db_name, resolve
 from ..ports import allocate_port
@@ -92,11 +92,32 @@ def _apply_env_patches(
         patch_env(target, updates)
 
 
+def _migrate_env(manifest: Manifest, worktree: Path) -> dict[str, str]:
+    """Build the env the migrate subprocess sees.
+
+    The migrate command (e.g. `alembic upgrade head`) typically reads
+    `DATABASE_URL` from the process environment. The user's shell doesn't
+    source the worktree's `.env`, so we merge our just-patched env files onto
+    `os.environ` ourselves — same effect as `set -a; source .env; set +a`, but
+    without invoking a shell and without ever printing values.
+    """
+    env = os.environ.copy()
+    for patch in manifest.env_patches:
+        env.update(read_env(worktree / patch.file))
+    return env
+
+
 def _run_migrate(manifest: Manifest, worktree: Path) -> None:
     if manifest.db is None or not manifest.db.migrate:
         return
     console.print(f"[dim]running migrate: {manifest.db.migrate}[/dim]")
-    subprocess.run(manifest.db.migrate, shell=True, cwd=worktree, check=True)
+    subprocess.run(
+        manifest.db.migrate,
+        shell=True,
+        cwd=worktree,
+        check=True,
+        env=_migrate_env(manifest, worktree),
+    )
 
 
 def run(
@@ -236,7 +257,10 @@ def run(
         project.save()
     except subprocess.CalledProcessError as e:
         err.print(f"[red]provisioning failed:[/red] {e}")
-        # Best-effort rollback.
+        # Best-effort rollback. We deliberately do NOT delete `branch` here,
+        # even if we created it: branches are cheap, and if the user managed
+        # to push before failure, dropping the ref would lose work. Re-running
+        # `wt new <shorthand>` will pick the existing branch back up.
         if db_created and db_name is not None:
             err.print(f"  rolling back db {db_name}")
             _drop_db_quiet(db_name)
