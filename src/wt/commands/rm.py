@@ -15,7 +15,7 @@ from pathlib import Path
 from rich.console import Console
 
 from ..project import Project
-from ..registry import PRIMARY, Worktree
+from ..types import PRIMARY, Worktree
 
 
 console = Console()
@@ -283,17 +283,17 @@ def _remove_one(
         else:
             err.print(f"  [yellow]warning:[/yellow] dropdb failed: {rd.stderr.strip()}")
 
-    project.registry.remove(wt.shorthand)
-    project.save()
+    # No registry mutation — once the worktree dir is gone, `derive_worktrees`
+    # stops returning it on the next read.
     return True
 
 
 def run_one(start: Path, shorthand: str, assume_yes: bool = False) -> int:
     """Remove one specific worktree by shorthand. Same safety checks as --auto."""
     project = Project.discover(start)
-    wt = project.registry.find(shorthand)
+    wt = project.find(shorthand)
     if wt is None:
-        err.print(f"[red]error:[/red] no worktree {shorthand!r} in registry.")
+        err.print(f"[red]error:[/red] no worktree {shorthand!r} found on disk.")
         return 2
 
     if wt.shorthand == PRIMARY:
@@ -332,7 +332,7 @@ def run_auto(start: Path) -> int:
 
     console.print("scanning worktrees…\n")
     eligible: list[tuple[Worktree, WorktreeChecks]] = []
-    for wt in project.registry.worktrees:
+    for wt in project.worktrees():
         if wt.shorthand == PRIMARY:
             console.print(f"  [dim]skip[/dim]  {wt.path}  [dim](primary)[/dim]")
             continue

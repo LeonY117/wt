@@ -1,4 +1,4 @@
-"""One-shot auto-import: register git-existing worktrees we don't know about."""
+"""Build Worktree snapshots from disk by reading each worktree's env files."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ import re
 from pathlib import Path
 
 from .envfile import read_env
-from .manifest import ImportHint, Manifest
+from .manifest import ImportHint
 from .project import Project
-from .registry import Worktree
 from .tenant import tenant_name_from_path
+from .types import Worktree
 
 
 def _extract(hint: ImportHint, env: dict[str, str]) -> str | None:
@@ -27,7 +27,7 @@ def _read_env_at(worktree_path: Path, relpath: str) -> dict[str, str]:
 
 
 def infer_worktree(project: Project, *, path: Path, branch: str | None) -> Worktree:
-    """Build a Worktree by inferring fields from the worktree's env files.
+    """Build a Worktree by reading the worktree's env files (per manifest hints).
 
     Falls back to service defaults / Nones where inference fails.
     """
@@ -81,21 +81,16 @@ def infer_worktree(project: Project, *, path: Path, branch: str | None) -> Workt
     )
 
 
-def import_missing(project: Project) -> list[str]:
-    """Add registry entries for any git worktree not yet known.
+def derive_worktrees(project: Project) -> list[Worktree]:
+    """Return the live set of worktrees, derived entirely from disk.
 
-    Returns list of shorthands imported.
+    Walks `git worktree list --porcelain` and reads each worktree's env files
+    via the manifest's import_hints. Stale paths (gone from disk) are skipped.
     """
-    known = project.known_shorthands()
-    added: list[str] = []
+    out: list[Worktree] = []
     for entry in project.all_git_worktrees():
         wt_path = Path(entry["path"])
-        shorthand = project.derive_shorthand(wt_path)
-        if shorthand in known:
+        if not wt_path.exists():
             continue
-        wt = infer_worktree(project, path=wt_path, branch=entry.get("branch"))
-        project.registry.upsert(wt)
-        added.append(shorthand)
-    if added:
-        project.save()
-    return added
+        out.append(infer_worktree(project, path=wt_path, branch=entry.get("branch")))
+    return out

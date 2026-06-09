@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-
-from .registry import Registry
+from collections.abc import Iterable
 
 
 def is_port_bound(port: int) -> bool:
@@ -22,28 +21,17 @@ def is_port_bound(port: int) -> bool:
     return bool(result.stdout.strip())
 
 
-def used_ports_for_service(registry: Registry, service: str) -> set[int]:
-    return {
-        wt.ports[service]
-        for wt in registry.worktrees
-        if service in wt.ports
-    }
+def allocate_port(used: Iterable[int], default: int) -> int:
+    """Pick the next free port given a set/iterable of already-used ports.
 
-
-def allocate_port(registry: Registry, service: str, default: int) -> int:
-    """Pick the next free port for `service`.
-
-    Strategy: highest currently-registered port for this service + 1; if that
-    port is bound by some other process, skip until a free one is found. If
-    no worktree has this service yet, start from `default`.
+    Strategy: highest in `used` + 1; if that port is bound by some other
+    process, skip until a free one is found. If `used` is empty, start from
+    `default`.
     """
-    used = used_ports_for_service(registry, service)
-    if used:
-        candidate = max(used) + 1
-    else:
-        candidate = default
-    while candidate in used or is_port_bound(candidate):
+    used_set = set(used)
+    candidate = max(used_set) + 1 if used_set else default
+    while candidate in used_set or is_port_bound(candidate):
         candidate += 1
         if candidate > 65535:
-            raise RuntimeError(f"ran out of ports for service {service!r}")
+            raise RuntimeError("ran out of ports")
     return candidate

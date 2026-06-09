@@ -72,8 +72,8 @@ cleanup:
   gitignored_exclude:             # extends the built-in regenerable-junk list
     - "mockups/.cache"            # surfaced by default; suppress per project
 
-import_hints:                     # used by `wt status` on first run only
-  ports:
+import_hints:                     # how every wt command reads ports/db/tenant
+  ports:                          # back from each worktree's .env files
     backend:
       file: frontend/.env.local
       key: NEXT_PUBLIC_BACKEND_URL
@@ -97,9 +97,11 @@ Available inside `env_patches.set` values and `db.name_template`:
 - `{tenant}`, `{tenant_path}` — name + resolved absolute path
 - `{project_root}` — repo root absolute path
 
-## Registry
+## State model
 
-Per project at `~/.config/wt/<project>.json`. Source of truth for ports, DB names, and current tenant pointer. Atomic writes (tempfile + rename). On first `wt status`, missing worktrees are auto-imported by parsing `.env` files against the manifest's `import_hints`.
+There's no persistent registry — disk is the source of truth. Every `wt` command walks `git worktree list` and reads each worktree's `.env` files via the manifest's `import_hints` to recover ports, db names, and the current tenant pointer. A worktree that gets removed by hand (or never created by `wt`) shows up correctly on the next `wt status` without any reconcile step.
+
+`wt new` provisions a worktree by creating files (git worktree + db + patched `.env`s); `wt tenant` rewrites the `.env`; `wt rm` deletes files. None of them maintain side metadata.
 
 ## Safety semantics
 

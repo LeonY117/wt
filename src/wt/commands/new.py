@@ -15,8 +15,8 @@ from ..manifest import EnvPatch, Manifest
 from ..placeholders import build_context, render_db_name, resolve
 from ..ports import allocate_port
 from ..project import Project
-from ..registry import Worktree
-from ..tenant import resolve_tenant
+from ..tenant import resolve_tenant, tenant_name_from_path
+from ..types import PRIMARY
 
 
 console = Console()
@@ -130,20 +130,26 @@ def run(
 ) -> int:
     project = Project.discover(start)
     manifest = project.manifest
-    registry = project.registry
     primary = project.primary
 
     # ---- validate shorthand ----
-    if shorthand in {"(primary)", ""}:
-        err.print("[red]error:[/red] shorthand cannot be empty or '(primary)'.")
-        return 2
-    if registry.find(shorthand) is not None:
-        err.print(f"[red]error:[/red] shorthand {shorthand!r} already registered.")
+    if shorthand in {PRIMARY, ""}:
+        err.print(f"[red]error:[/red] shorthand cannot be empty or {PRIMARY!r}.")
         return 2
 
     target_path = (primary.parent / f"{manifest.worktree_prefix}{shorthand}").resolve()
     if target_path.exists():
         err.print(f"[red]error:[/red] {target_path} already exists on disk.")
+        return 2
+
+    # One disk read covers shorthand collision, primary-tenant inherit, and
+    # port allocation. Avoids re-shelling out `git worktree list` three times.
+    existing = project.worktrees()
+    if any(w.shorthand == shorthand for w in existing):
+        err.print(
+            f"[red]error:[/red] shorthand {shorthand!r} is already in use by "
+            f"another worktree on disk."
+        )
         return 2
 
     # ---- resolve branch ----
@@ -155,8 +161,8 @@ def run(
     tenant_path: str | None = None
     if manifest.tenant is not None:
         if tenant is None:
-            # Inherit from primary worktree's registry entry, if known.
-            primary_entry = registry.find("(primary)")
+            # Inherit from the primary's live .env (DEPLOYMENT_ROOT).
+            primary_entry = next((w for w in existing if w.shorthand == PRIMARY), None)
             if primary_entry is not None:
                 tenant_name = primary_entry.tenant
                 tenant_path = primary_entry.tenant_path
@@ -180,7 +186,8 @@ def run(
     # ---- allocate ports ----
     ports: dict[str, int] = {}
     for service in manifest.services:
-        ports[service.name] = allocate_port(registry, service.name, service.default_port)
+        used = {w.ports[service.name] for w in existing if service.name in w.ports}
+        ports[service.name] = allocate_port(used, service.default_port)
 
     # ---- compute DB name ----
     db_name = render_db_name(manifest, shorthand)
@@ -242,19 +249,7 @@ def run(
         else:
             console.print("[dim]skipping migrate (--skip-migrate)[/dim]")
 
-        # ---- step 5: register ----
-        registry.upsert(
-            Worktree(
-                shorthand=shorthand,
-                path=str(target_path),
-                branch=branch,
-                ports=ports,
-                db=db_name,
-                tenant=tenant_name,
-                tenant_path=tenant_path,
-            )
-        )
-        project.save()
+        # No registry write — the env files we just patched are the source of truth.
     except subprocess.CalledProcessError as e:
         err.print(f"[red]provisioning failed:[/red] {e}")
         # Best-effort rollback. We deliberately do NOT delete `branch` here,

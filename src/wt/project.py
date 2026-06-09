@@ -1,4 +1,4 @@
-"""Project discovery + linkage of manifest, registry, and git worktrees."""
+"""Project discovery + the single read API onto a project's worktrees."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 from .manifest import Manifest
-from .registry import PRIMARY, Registry, Worktree
+from .types import PRIMARY, Worktree
 
 
 MANIFEST_FILENAME = ".wt.yaml"
@@ -78,11 +78,14 @@ def shorthand_underscored(shorthand: str) -> str:
 
 
 class Project:
-    """Bundle of manifest + registry + primary worktree path for a project."""
+    """Bundle of manifest + primary worktree path for a project.
 
-    def __init__(self, manifest: Manifest, registry: Registry, primary: Path):
+    There's no persistent registry: every read derives the live set of
+    worktrees from `git worktree list` + each worktree's env files.
+    """
+
+    def __init__(self, manifest: Manifest, primary: Path):
         self.manifest = manifest
-        self.registry = registry
         self.primary = primary
 
     @classmethod
@@ -95,24 +98,31 @@ class Project:
             )
         manifest = Manifest.load(manifest_path)
         primary = primary_worktree_path(manifest.project_root)
-        registry = Registry.load(manifest.project, primary)
-        # Keep registry.project_root fresh if the repo moves.
-        registry.project_root = str(primary)
-        return cls(manifest, registry, primary)
-
-    def save(self) -> None:
-        self.registry.save()
+        return cls(manifest, primary)
 
     # ---- worktree lookups ----
 
     def all_git_worktrees(self) -> list[dict]:
         return list_git_worktrees(self.primary)
 
-    def known_shorthands(self) -> set[str]:
-        return {w.shorthand for w in self.registry.worktrees}
-
-    def shorthand_in_use(self, shorthand: str) -> bool:
-        return self.registry.find(shorthand) is not None
-
     def derive_shorthand(self, path: Path) -> str:
         return shorthand_for(path, self.primary, self.manifest.worktree_prefix)
+
+    def worktrees(self) -> list[Worktree]:
+        """The single read API. Walks git + reads env files for every worktree.
+
+        Cheap enough for typical project sizes (<20 worktrees, ~5-20ms per
+        shell-out); cache the result at the call site if you'll iterate it.
+        """
+        from .importer import derive_worktrees
+
+        return derive_worktrees(self)
+
+    def find(self, shorthand: str, worktrees: list[Worktree] | None = None) -> Worktree | None:
+        """Look up one worktree by shorthand. Pass `worktrees` to reuse a cached list."""
+        if worktrees is None:
+            worktrees = self.worktrees()
+        for wt in worktrees:
+            if wt.shorthand == shorthand:
+                return wt
+        return None

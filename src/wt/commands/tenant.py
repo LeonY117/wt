@@ -11,8 +11,8 @@ from ..envfile import patch_env
 from ..placeholders import build_context, resolve
 from ..ports import is_port_bound
 from ..project import Project
-from ..registry import PRIMARY
 from ..tenant import list_tenants, resolve_tenant
+from ..types import PRIMARY
 
 
 console = Console()
@@ -36,7 +36,7 @@ def list_run(start: Path) -> int:
     table.add_column("path")
 
     used_paths: set[str] = {
-        wt.tenant for wt in project.registry.worktrees if wt.tenant
+        wt.tenant for wt in project.worktrees() if wt.tenant
     }
 
     for name, path in tenants:
@@ -55,9 +55,9 @@ def set_run(start: Path, shorthand: str, tenant: str) -> int:
         err.print("[red]error:[/red] no tenant config in .wt.yaml.")
         return 2
 
-    wt = project.registry.find(shorthand)
+    wt = project.find(shorthand)
     if wt is None:
-        err.print(f"[red]error:[/red] no worktree {shorthand!r} in registry.")
+        err.print(f"[red]error:[/red] no worktree {shorthand!r} found on disk.")
         return 2
 
     tenant_path = resolve_tenant(manifest, tenant)
@@ -69,19 +69,18 @@ def set_run(start: Path, shorthand: str, tenant: str) -> int:
         return 2
 
     old_tenant = wt.tenant
-    wt.tenant = tenant
-    wt.tenant_path = str(tenant_path)
 
     # Re-apply only the env patches that touch tenant placeholders. We re-render
     # all patches but only write keys whose resolved value differs — keeps the
-    # change surgical and avoids stomping on unrelated values.
+    # change surgical and avoids stomping on unrelated values. The env-file
+    # patch IS the source of truth; next `wt status` will reflect it.
     context = build_context(
         manifest=manifest,
         shorthand=shorthand,
         ports=wt.ports,
         db=wt.db,
-        tenant=wt.tenant,
-        tenant_path=wt.tenant_path,
+        tenant=tenant,
+        tenant_path=str(tenant_path),
     )
     worktree_path = Path(wt.path)
     for patch in manifest.env_patches:
@@ -95,8 +94,6 @@ def set_run(start: Path, shorthand: str, tenant: str) -> int:
             updates[key] = resolve(template, context)
         if updates:
             patch_env(target, updates)
-
-    project.save()
 
     console.print(
         f"[green]✓[/green] {shorthand}: tenant "
