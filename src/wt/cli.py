@@ -61,7 +61,7 @@ def new(
         False, "--skip-migrate", help="Don't run the db migrate command."
     ),
 ) -> None:
-    """Provision a new worktree: git worktree add, createdb, env patch, migrate, register."""
+    """Provision a new worktree: git worktree add, createdb, env patch, migrate."""
     try:
         rc = new_cmd.run(
             start=Path.cwd(),
