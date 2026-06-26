@@ -90,6 +90,12 @@ def rm(
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Skip the per-worktree confirmation prompt."
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Bypass the dirty/unpushed/unmerged refusal behind a stern retype-the-name "
+        "confirmation. Cannot force the primary or cleanup.protected worktrees.",
+    ),
 ) -> None:
     """Safely tear down a worktree and its DB (refuses dirty/unpushed/unmerged)."""
     try:
@@ -97,12 +103,15 @@ def rm(
             if shorthand is not None:
                 _die("pass either <shorthand> or --auto, not both.")
                 return
+            if force:
+                _die("--force only applies to a single <shorthand>, not --auto.")
+                return
             rc = rm_cmd.run_auto(Path.cwd())
         else:
             if shorthand is None:
                 _die("pass a <shorthand> or use --auto.")
                 return
-            rc = rm_cmd.run_one(Path.cwd(), shorthand, assume_yes=yes)
+            rc = rm_cmd.run_one(Path.cwd(), shorthand, assume_yes=yes, force=force)
     except FileNotFoundError as e:
         _die(str(e))
         return

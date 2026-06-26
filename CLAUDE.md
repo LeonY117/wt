@@ -31,7 +31,8 @@ No persistent registry. `Project.worktrees()` is the single read API — it walk
 - **Never log .env values.** `envfile.py` only returns dicts; callers must avoid printing values. Ports and DB names are not secrets; Clerk keys, API keys, DB passwords are.
 - **Atomic writes** for patched .env files (tempfile + rename).
 - **Disk is the source of truth.** Don't add a side index, cache, or registry. If a command needs to know about a worktree, derive it from `git worktree list` + env files via `Project.worktrees()`.
-- **Refuse, don't force.** `wt rm` mirrors the old bash script's safety floor — no `--force` flag exposed unless we genuinely need it. Same for `wt new`: roll back on failure, don't leave half-provisioned state.
+- **Refuse by default; force is a stern, deliberate escape hatch.** `wt rm` mirrors the old bash script's safety floor. `wt rm --force` exists for the cases the floor can't anticipate, but it's gated behind a retype-the-worktree-name confirmation (see `_confirm_force`) — not a casual `--yes`. The primary and `cleanup.protected` worktrees are never force-removable; keep it that way. `wt new` still rolls back on failure rather than leaving half-provisioned state.
+- **Trust the resolved PR over git's view of merge state.** Squash-merges leave the branch's commits out of `main`'s history and (after the remote branch is deleted + pruned) strip the upstream ref. `_check` keys off the `gh` PR state plus a tip-equals-PR-head test (`tip_is_pr_head`), not `git branch --merged`, so a clean squash-merge isn't mistaken for unmerged/unpushed work.
 - **Manifest-driven.** Every project-specific behaviour goes through `.wt.yaml`. If brain-app needs special handling that wouldn't fit any other project, push back on the design before hard-coding it.
 - **One command per file** under `commands/`. Keep `cli.py` thin — argparse-ish wiring only.
 

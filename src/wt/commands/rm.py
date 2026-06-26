@@ -40,6 +40,19 @@ DEFAULT_GITIGNORED_EXCLUDES = (
 )
 
 
+# Static reminders printed before `wt rm` destroys a worktree — and when it
+# refuses one. The gitignored sweep below shows what's *actually* on disk;
+# this checklist is the discipline-prompt for the agent driving the tool, since
+# `git worktree remove` deletes the whole directory and anything not migrated
+# out is gone for good. Extend per-project via `cleanup.checklist` in `.wt.yaml`.
+DEFAULT_CLEANUP_CHECKLIST = (
+    "Mockups / prototype files moved out of the worktree (e.g. a `mockups/` dir)?",
+    "Notes / scratch docs migrated to the repo's `notes/` or the vault?",
+    "Generated reports, exports, or screenshots you wanted copied elsewhere?",
+    "Nothing under this worktree is still referenced by work in progress?",
+)
+
+
 @dataclass
 class WorktreeChecks:
     shorthand: str
@@ -140,40 +153,58 @@ def _check(project: Project, wt: Worktree) -> WorktreeChecks | None:
     state, resolved_at, head_sha = _gh_latest_pr(wt.branch)
     checks.pr_state = state
     checks.pr_resolved_at = resolved_at
+    local_sha = _git_at(path, ["rev-parse", "HEAD"]).strip()
+
+    # When the local tip is *exactly* the PR's head commit, the branch holds
+    # nothing the PR didn't already capture — there is no local-only work to
+    # lose, regardless of what the remote branch looks like now. This is the
+    # squash-merge happy path: GitHub squashes the branch into a single new
+    # commit on main, then auto-deletes the branch. The original commits never
+    # land in main's history and the remote branch (and, after a prune, its
+    # tracking ref) is gone — which would otherwise trip the "no upstream" /
+    # "unpushed commits" checks below and wrongly refuse a cleanly-merged
+    # worktree. Trusting the resolved PR + matching tip sidesteps that.
+    tip_is_pr_head = bool(head_sha and local_sha and local_sha == head_sha)
+
     if state == "MERGED":
         checks.merged_sha = head_sha
-        # Catch the case where the branch was amended/force-pushed after the
-        # merge — local tip would then carry post-merge work we'd silently lose.
-        local_sha = _git_at(path, ["rev-parse", "HEAD"]).strip()
+        # Branch amended/force-pushed after the merge — local tip carries
+        # post-merge work we'd silently lose. (tip_is_pr_head is False here.)
         if head_sha and local_sha and local_sha != head_sha:
             checks.reasons.append(
                 f"local tip {local_sha[:7]} differs from merged SHA "
                 f"{head_sha[:7]} (amended/force-pushed since merge?)"
             )
     elif state == "CLOSED":
-        # No SHA-match check: closed-without-merge has no canonical "final"
-        # SHA to compare against. The unpushed-commits check below still
-        # catches local-only work.
+        # No SHA-match *reason*: closed-without-merge has no canonical "final"
+        # SHA. But if the tip matches the PR head we still treat it as clean
+        # (tip_is_pr_head) and skip the upstream checks; otherwise those checks
+        # below catch local-only work.
         pass
     elif state == "OPEN":
         checks.reasons.append(f"open PR on remote for {wt.branch}")
     else:
         checks.reasons.append(f"no PR on remote for {wt.branch}")
 
-    # Dirty / untracked.
+    # Dirty / untracked — always relevant, the PR never captures these.
     porcelain = _git_at(path, ["status", "--porcelain"]).strip()
     if porcelain:
         dirty_count = len(porcelain.splitlines())
         checks.reasons.append(f"{dirty_count} uncommitted/untracked file(s)")
 
-    # Unpushed commits.
-    upstream = _git_at(path, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]).strip()
-    if not upstream:
-        checks.reasons.append(f"no upstream set for {wt.branch}")
-    else:
-        ahead = _git_at(path, ["rev-list", "--count", f"{upstream}..HEAD"]).strip()
-        if ahead and ahead != "0":
-            checks.reasons.append(f"{ahead} unpushed commit(s) vs {upstream}")
+    # Unpushed commits. Skipped when the tip already matches the resolved PR
+    # head (see tip_is_pr_head above) — there, a missing upstream means the
+    # remote branch was deleted post-merge, not that work is stranded.
+    if not tip_is_pr_head:
+        upstream = _git_at(
+            path, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]
+        ).strip()
+        if not upstream:
+            checks.reasons.append(f"no upstream set for {wt.branch}")
+        else:
+            ahead = _git_at(path, ["rev-list", "--count", f"{upstream}..HEAD"]).strip()
+            if ahead and ahead != "0":
+                checks.reasons.append(f"{ahead} unpushed commit(s) vs {upstream}")
 
     return checks
 
@@ -201,6 +232,58 @@ def _gitignored_content(path: Path, extra_excludes: list[str]) -> list[str]:
             continue
         out.append(entry)
     return out
+
+
+def _print_cleanup_checklist(project: Project, out: Console) -> None:
+    """Print the static "did you clean this up?" reminder for the agent.
+
+    Built-in items (`DEFAULT_CLEANUP_CHECKLIST`) plus any project-specific ones
+    from `cleanup.checklist`. Purely advisory — it doesn't block, it nudges.
+    """
+    items = list(DEFAULT_CLEANUP_CHECKLIST) + list(project.manifest.cleanup.checklist)
+    out.print("  [bold]cleanup checklist[/bold] — verify before the directory is destroyed:")
+    for item in items:
+        out.print(f"    [ ] {item}")
+
+
+def _confirm_force(shorthand: str, reasons: list[str]) -> bool:
+    """Stern, deliberate gate for `wt rm --force`. Returns True only when the
+    caller types the worktree's exact shorthand back.
+
+    Forcing bypasses every safety reason, so the confirmation is intentionally
+    harder than a casual `y`: the operator must retype the worktree name. Reads
+    from stdin; on EOF (non-interactive run) it aborts and prints the one-liner
+    that supplies the confirmation, so an agent can opt in deliberately.
+    """
+    err.print()
+    err.print("[bold red]⚠  FORCE REMOVE — every safety check below is being bypassed:[/bold red]")
+    for r in reasons:
+        err.print(f"     [red]↳ {r}[/red]")
+    err.print()
+    err.print(
+        "[red]This permanently deletes the worktree even though it is NOT in a known-safe\n"
+        "state. Uncommitted changes, unpushed commits, and gitignored files (mockups,\n"
+        "notes, drafts listed above) will be gone for good — there is no undo.[/red]"
+    )
+    err.print()
+    err.print(
+        f"Have you double-checked [bold]every[/bold] item above and the cleanup checklist?\n"
+        f"If so, type the worktree name exactly ([bold]{shorthand}[/bold]) to proceed. "
+        f"Anything else aborts."
+    )
+    try:
+        ans = input("confirm worktree name: ").strip()
+    except EOFError:
+        err.print("[dim]no confirmation received — aborted.[/dim]")
+        err.print(
+            f"[dim]to force non-interactively: "
+            f"echo '{shorthand}' | wt rm {shorthand} --force[/dim]"
+        )
+        return False
+    if ans != shorthand:
+        err.print("[dim]name did not match — aborted.[/dim]")
+        return False
+    return True
 
 
 def _db_exists(name: str) -> bool:
@@ -259,7 +342,17 @@ def _remove_one(
             "regenerable patterns.[/dim]"
         )
 
-    if not assume_yes:
+    # Static reminder, right before the confirmation gate.
+    _print_cleanup_checklist(project, console)
+
+    blocked = bool(checks and checks.reasons)
+    if blocked and force:
+        # Forcing past real blockers — demand the stern, retype-the-name gate
+        # regardless of --yes. (A clean worktree with no reasons never reaches
+        # this branch; force just means "git worktree remove --force".)
+        if not _confirm_force(wt.shorthand, checks.reasons):
+            return False
+    elif not assume_yes:
         ans = input("proceed? [y/N] ").strip().lower()
         if ans not in {"y", "yes"}:
             console.print("[dim]skipped[/dim]")
@@ -288,8 +381,15 @@ def _remove_one(
     return True
 
 
-def run_one(start: Path, shorthand: str, assume_yes: bool = False) -> int:
-    """Remove one specific worktree by shorthand. Same safety checks as --auto."""
+def run_one(
+    start: Path, shorthand: str, assume_yes: bool = False, force: bool = False
+) -> int:
+    """Remove one specific worktree by shorthand. Same safety checks as --auto.
+
+    `force` bypasses the safety *reasons* (dirty / unpushed / unmerged) behind a
+    stern retype-the-name confirmation. The primary and `cleanup.protected`
+    worktrees are never force-removable — those refusals stand.
+    """
     project = Project.discover(start)
     wt = project.find(shorthand)
     if wt is None:
@@ -302,6 +402,7 @@ def run_one(start: Path, shorthand: str, assume_yes: bool = False) -> int:
     if wt.shorthand in project.manifest.cleanup.protected:
         err.print(
             f"[red]error:[/red] {shorthand!r} is in cleanup.protected — refusing."
+            " (not bypassable with --force)"
         )
         return 2
 
@@ -311,18 +412,22 @@ def run_one(start: Path, shorthand: str, assume_yes: bool = False) -> int:
         err.print(f"[red]error:[/red] {shorthand!r} is not eligible for removal.")
         return 2
 
-    if checks.reasons:
+    if checks.reasons and not force:
         err.print(f"[yellow]hold[/yellow] {checks.path}")
         for r in checks.reasons:
             err.print(f"  ↳ {r}")
         err.print()
+        err.print("[bold]before removing, make sure you have cleaned up the worktree:[/bold]")
+        _print_cleanup_checklist(project, err)
+        err.print()
         err.print(
-            "refusing to remove. Resolve the reasons above or run with manual "
-            "git/dropdb commands if you know what you're doing."
+            "refusing to remove. Resolve the reasons above, or — once you have "
+            f"verified the checklist — force past them with [bold]wt rm {shorthand} "
+            "--force[/bold] (you'll be asked to confirm the worktree name)."
         )
         return 1
 
-    ok = _remove_one(project, wt, checks, assume_yes=assume_yes)
+    ok = _remove_one(project, wt, checks, force=force, assume_yes=assume_yes)
     return 0 if ok else 1
 
 

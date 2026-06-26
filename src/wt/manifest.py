@@ -36,6 +36,12 @@ class CleanupConfig(BaseModel):
     # surface during its pre-removal gitignored-content sweep. Default list
     # is in `commands.rm.DEFAULT_GITIGNORED_EXCLUDES`.
     gitignored_exclude: list[str] = Field(default_factory=list)
+    # Extra reminders appended to the built-in pre-removal checklist that
+    # `wt rm` prints before destroying a worktree (and when refusing one).
+    # Each entry is a free-text "did you clean this up?" hint aimed at the
+    # agent driving the tool. Built-in defaults live in
+    # `commands.rm.DEFAULT_CLEANUP_CHECKLIST`.
+    checklist: list[str] = Field(default_factory=list)
 
 
 class ImportHint(BaseModel):
