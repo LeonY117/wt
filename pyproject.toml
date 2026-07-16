@@ -10,6 +10,11 @@ dependencies = [
     "pyyaml>=6",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
 [project.scripts]
 wt = "wt.cli:app"
 

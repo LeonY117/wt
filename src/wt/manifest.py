@@ -61,6 +61,7 @@ class ImportHints(BaseModel):
 class Manifest(BaseModel):
     project: str | None = None
     worktree_prefix: str
+    worktree_root: str | None = None
     services: list[Service]
     env_patches: list[EnvPatch] = Field(default_factory=list)
     db: DBConfig | None = None
@@ -87,6 +88,15 @@ class Manifest(BaseModel):
             if s.name == name:
                 return s
         raise KeyError(f"service {name!r} not declared in {self.manifest_path}")
+
+    def resolved_worktree_root(self, primary: Path | None = None) -> Path | None:
+        """Resolve the optional worktree container against the primary root."""
+        if self.worktree_root is None:
+            return None
+        root = Path(self.worktree_root).expanduser()
+        if not root.is_absolute():
+            root = (primary or self.project_root) / root
+        return root.resolve()
 
     def expanded_tenant_search_paths(self) -> list[Path]:
         if not self.tenant:

@@ -137,7 +137,11 @@ def run(
         err.print(f"[red]error:[/red] shorthand cannot be empty or {PRIMARY!r}.")
         return 2
 
-    target_path = (primary.parent / f"{manifest.worktree_prefix}{shorthand}").resolve()
+    worktree_root = manifest.resolved_worktree_root(primary)
+    if worktree_root is None:
+        target_path = (primary.parent / f"{manifest.worktree_prefix}{shorthand}").resolve()
+    else:
+        target_path = (worktree_root / shorthand).resolve()
     if target_path.exists():
         err.print(f"[red]error:[/red] {target_path} already exists on disk.")
         return 2
@@ -208,6 +212,8 @@ def run(
     worktree_created = False
     db_created = False
     try:
+        if worktree_root is not None:
+            worktree_root.mkdir(parents=True, exist_ok=True)
         cmd = ["git", "worktree", "add"]
         if create_branch:
             cmd += ["-b", branch, str(target_path)]

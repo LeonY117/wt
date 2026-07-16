@@ -9,6 +9,7 @@ import typer
 from rich.console import Console
 
 from .commands import new as new_cmd
+from .commands import rescue as rescue_cmd
 from .commands import rm as rm_cmd
 from .commands import status as status_cmd
 from .commands import tenant as tenant_cmd
@@ -93,11 +94,12 @@ def rm(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Bypass the dirty/unpushed/unmerged refusal behind a stern retype-the-name "
-        "confirmation. Cannot force the primary or cleanup.protected worktrees.",
+        help="Bypass dirty/unpushed/unmerged/live-process refusals behind a stern "
+        "retype-the-name confirmation. Cannot force the primary or "
+        "cleanup.protected worktrees.",
     ),
 ) -> None:
-    """Safely tear down a worktree and its DB (refuses dirty/unpushed/unmerged)."""
+    """Rescue Claude state, then safely remove a worktree and its DB."""
     try:
         if auto:
             if shorthand is not None:
@@ -112,6 +114,23 @@ def rm(
                 _die("pass a <shorthand> or use --auto.")
                 return
             rc = rm_cmd.run_one(Path.cwd(), shorthand, assume_yes=yes, force=force)
+    except FileNotFoundError as e:
+        _die(str(e))
+        return
+    raise typer.Exit(rc)
+
+
+@app.command("rescue")
+def rescue(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Move orphaned sessions to the primary and archive remaining state.",
+    ),
+) -> None:
+    """Report orphaned Claude Code state, or recover it with --apply."""
+    try:
+        rc = rescue_cmd.run(Path.cwd(), apply=apply)
     except FileNotFoundError as e:
         _die(str(e))
         return

@@ -36,6 +36,8 @@ wt new <shorthand> [<branch>] [--tenant X] # provision a fresh worktree
 wt rm <shorthand>                          # tear down a single worktree
 wt rm <shorthand> --force                  # bypass safety refusals (stern confirm)
 wt rm --auto                               # scan all, prompt y/N per eligible
+wt rescue                                  # dry-run report of orphaned Claude state
+wt rescue --apply                          # move sessions + archive remaining state
 wt tenants                                 # list available tenant packages
 wt tenant <shorthand> <name>               # repoint a worktree to a different tenant
 ```
@@ -44,7 +46,8 @@ wt tenant <shorthand> <name>               # repoint a worktree to a different t
 
 ```yaml
 project: brain-app                # human label (defaults to repo dir name)
-worktree_prefix: brain-app--      # required — used to build & detect worktrees
+worktree_prefix: brain-app--      # required — legacy sibling naming / shorthand
+worktree_root: ../brain-app--worktrees  # optional; relative to the primary root
 
 services:
   - { name: backend,  default_port: 8000 }
@@ -90,6 +93,13 @@ import_hints:                     # how every wt command reads ports/db/tenant
     key: DEPLOYMENT_ROOT
 ```
 
+`worktree_root` may be absolute, relative, or start with `~`. When present,
+`wt new feature` creates `<worktree_root>/feature` and creates the root directory
+and its parents as needed. When absent, the existing sibling layout is unchanged:
+`<primary-parent>/<worktree_prefix>feature`. Discovery comes from
+`git worktree list`, so old prefixed siblings and new root-contained worktrees can
+coexist without migration or transition state.
+
 ### Placeholders
 
 Available inside `env_patches.set` values and `db.name_template`:
@@ -104,12 +114,32 @@ Available inside `env_patches.set` values and `db.name_template`:
 
 There's no persistent registry — disk is the source of truth. Every `wt` command walks `git worktree list` and reads each worktree's `.env` files via the manifest's `import_hints` to recover ports, db names, and the current tenant pointer. A worktree that gets removed by hand (or never created by `wt`) shows up correctly on the next `wt status` without any reconcile step.
 
-`wt new` provisions a worktree by creating files (git worktree + db + patched `.env`s); `wt tenant` rewrites the `.env`; `wt rm` deletes files. None of them maintain side metadata.
+`wt new` provisions a worktree by creating files (git worktree + db + patched `.env`s); `wt tenant` rewrites the `.env`; `wt rm` rescues Claude Code state before removing the worktree and its database. None of them maintain side metadata.
+
+## Claude Code state rescue
+
+Claude Code stores per-project sessions and memory under a directory keyed by
+the checkout's absolute path in `~/.claude/projects/`. Before `wt rm` removes a
+worktree, it rescues the Claude project directories keyed by both the worktree
+root and launches from any subdirectory (such as `backend/`). It moves their
+top-level `*.jsonl` sessions into the primary checkout's Claude project directory.
+It never overwrites a session with the same filename: collisions are reported
+and preserved. Any remaining state, including `memory/`, is moved intact to
+`~/.wt-history/claude-state/<project>-<shorthand>-<YYYY-MM-DD>/`; memory is not
+merged into the primary.
+
+`wt rescue` backfills state orphaned by worktrees removed before this behavior
+existed. Its default mode is read-only and reports each candidate's session count
+and last-modified time. `wt rescue --apply` performs the same move-and-archive
+operation. Candidates are found by the primary path prefix and excluded when
+their munged name belongs to the primary, any worktree still listed by git, or
+a subdirectory launch beneath a live worktree.
 
 ## Safety semantics
 
-- **`wt rm` refuses** dirty / unpushed worktrees, branches without a resolved (merged or closed) PR, the primary worktree, and anything listed in `cleanup.protected`. A closed-without-merge PR is treated as a deliberate decision — the prompt surfaces a warning so you can verify the work is preserved elsewhere before confirming.
+- **`wt rm` refuses** dirty / unpushed worktrees, branches without a resolved (merged or closed) PR, worktrees with any live process whose cwd is inside them, the primary worktree, and anything listed in `cleanup.protected`. The process refusal lists names and PIDs. A closed-without-merge PR is treated as a deliberate decision — the prompt surfaces a warning so you can verify the work is preserved elsewhere before confirming.
 - **Squash-merges are recognised.** When the worktree's tip is exactly the resolved PR's head commit, `wt rm` trusts the merge and skips the upstream / unpushed-commit checks. That's the squash-merge path: GitHub squashes the branch into one new commit and auto-deletes the branch, so the original commits never land in `main`'s history and the remote branch (and its tracking ref, after a prune) is gone — which would otherwise read as "no upstream" and wrongly block a cleanly-merged worktree. A tip that has moved *past* the merged head still refuses (it carries un-captured local work).
 - **`wt rm` surfaces gitignored content** before the prompt — mockups, drafts, scratch notes the safety floor can't see — and prints a **cleanup checklist** reminding you to migrate folders (mockups, notes, exports) out before the directory is destroyed. Known regenerable junk (`node_modules`, `.venv`, `.next`, `__pycache__`, `.DS_Store`, `.env*`, etc.) is filtered from the gitignored sweep; extend it via `cleanup.gitignored_exclude`, and add project-specific checklist reminders via `cleanup.checklist`.
 - **`wt new` rolls back** the worktree + DB if any later step fails. The branch is left in place — re-running `wt new <shorthand>` picks it up. (Branches are cheap; deleting a ref that may have been pushed is not.)
-- **`--force` is the deliberate escape hatch.** `wt rm <shorthand> --force` bypasses the dirty / unpushed / unmerged refusals, but only behind a stern gate: it prints every bypassed reason plus the cleanup checklist, then makes you **retype the worktree's exact name** to proceed (`--yes` does not skip this; on a non-interactive run it aborts and prints the `echo '<name>' | wt rm <name> --force` one-liner). The primary and `cleanup.protected` worktrees are never force-removable.
+- **Claude state is move-only.** Neither normal removal, `--force`, nor `wt rescue --apply` overwrites or deletes session or memory files. If rescue itself fails, worktree removal aborts.
+- **`--force` is the deliberate escape hatch.** `wt rm <shorthand> --force` bypasses the dirty / unpushed / unmerged / live-process refusals, but only behind a stern gate: it prints every bypassed reason plus the cleanup checklist, then makes you **retype the worktree's exact name** to proceed (`--yes` does not skip this; on a non-interactive run it aborts and prints the `echo '<name>' | wt rm <name> --force` one-liner). Claude state rescue still runs first. The primary and `cleanup.protected` worktrees are never force-removable.

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from rich.console import Console
 
+from ..claude_state import rescue_worktree_state
 from ..project import Project
 from ..types import PRIMARY, Worktree
 
@@ -62,6 +63,46 @@ class WorktreeChecks:
     pr_state: str | None = None  # "MERGED" or "CLOSED"
     pr_resolved_at: str | None = None  # mergedAt for MERGED, closedAt for CLOSED
     merged_sha: str | None = None  # only set when pr_state == "MERGED"
+
+
+@dataclass(frozen=True)
+class CwdProcess:
+    pid: int
+    name: str
+    cwd: Path
+
+
+def _live_cwd_processes(path: Path) -> list[CwdProcess]:
+    """Return processes whose cwd is the worktree or one of its descendants."""
+    r = subprocess.run(
+        ["lsof", "-a", "-d", "cwd", "-Fpcn"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        return []
+
+    root = path.resolve()
+    found: list[CwdProcess] = []
+    pid: int | None = None
+    name = "unknown"
+    for line in r.stdout.splitlines():
+        if line.startswith("p"):
+            try:
+                pid = int(line[1:])
+            except ValueError:
+                pid = None
+            name = "unknown"
+        elif line.startswith("c"):
+            name = line[1:] or "unknown"
+        elif line.startswith("n") and pid is not None:
+            cwd = Path(line[1:])
+            try:
+                cwd.resolve().relative_to(root)
+            except (ValueError, OSError):
+                continue
+            found.append(CwdProcess(pid=pid, name=name, cwd=cwd))
+    return found
 
 
 def _git_at(path: Path, args: list[str]) -> str:
@@ -124,7 +165,7 @@ def _gh_latest_pr(branch: str) -> tuple[str | None, str | None, str | None]:
 
 def _check(project: Project, wt: Worktree) -> WorktreeChecks | None:
     """Run the merged/dirty/unpushed checks. Returns None if the worktree should
-    be silently skipped (protected, primary, non-prefixed). Otherwise returns a
+    be silently skipped (protected or primary). Otherwise returns a
     WorktreeChecks with .reasons populated for any blockers (empty list = ok).
     """
     manifest = project.manifest
@@ -134,14 +175,17 @@ def _check(project: Project, wt: Worktree) -> WorktreeChecks | None:
         return None
     if wt.shorthand in manifest.cleanup.protected:
         return None
-    if not path.name.startswith(manifest.worktree_prefix):
-        return None
-
     checks = WorktreeChecks(shorthand=wt.shorthand, path=path, branch=wt.branch)
 
     if not path.exists():
         checks.reasons.append("worktree directory missing on disk")
         return checks
+
+    for process in _live_cwd_processes(path):
+        checks.reasons.append(
+            f"live process has cwd inside worktree: {process.name} "
+            f"(PID {process.pid}, cwd {process.cwd})"
+        )
 
     if wt.branch is None:
         checks.reasons.append("detached HEAD — skipping")
@@ -358,6 +402,39 @@ def _remove_one(
             console.print("[dim]skipped[/dim]")
             return False
 
+    # Claude Code keys sessions and memory by the worktree's absolute path.
+    # Rescue that state before the directory disappears, even under --force.
+    try:
+        rescued = rescue_worktree_state(
+            source=path,
+            primary=project.primary,
+            project=project.manifest.project or project.primary.name,
+            shorthand=wt.shorthand,
+        )
+    except OSError as exc:
+        err.print(f"[red]Claude state rescue failed; removal aborted:[/red] {exc}")
+        return False
+
+    for result in rescued:
+        if not result.found:
+            continue
+        console.print(
+            f"  [green]✓[/green] {result.sessions_moved} session(s) moved to "
+            f"{result.destination}"
+        )
+        for name in result.collisions:
+            console.print(
+                f"  [yellow]collision:[/yellow] {name} already exists at the "
+                "destination; the source was preserved"
+            )
+        if result.archive is not None:
+            console.print(f"  [green]✓[/green] memory archived to {result.archive}")
+        if result.archive_collision is not None:
+            console.print(
+                f"  [yellow]collision:[/yellow] archive {result.archive_collision} "
+                "already exists; remaining source state was left in place"
+            )
+
     # git worktree remove (never --force unless explicitly forced).
     cmd = ["git", "worktree", "remove"]
     if force:
@@ -386,9 +463,9 @@ def run_one(
 ) -> int:
     """Remove one specific worktree by shorthand. Same safety checks as --auto.
 
-    `force` bypasses the safety *reasons* (dirty / unpushed / unmerged) behind a
-    stern retype-the-name confirmation. The primary and `cleanup.protected`
-    worktrees are never force-removable — those refusals stand.
+    `force` bypasses the safety *reasons* (dirty / unpushed / unmerged / live
+    cwd process) behind a stern retype-the-name confirmation. The primary and
+    `cleanup.protected` worktrees are never force-removable — those refusals stand.
     """
     project = Project.discover(start)
     wt = project.find(shorthand)
