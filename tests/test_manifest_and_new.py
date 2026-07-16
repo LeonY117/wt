@@ -132,3 +132,54 @@ def test_new_rolls_back_custom_root_worktree_on_failure(
         text=True,
     ).stdout
     assert str(target) not in listed
+
+
+@pytest.mark.parametrize(
+    ("branch", "branch_type", "expected"),
+    [
+        (None, "feat", "feat/templated"),
+        (None, "fix", "fix/templated"),
+        ("chore/explicit", "fix", "chore/explicit"),
+    ],
+)
+def test_new_renders_branch_template_only_for_an_omitted_branch(
+    repo_factory,
+    tmp_path: Path,
+    branch: str | None,
+    branch_type: str,
+    expected: str,
+) -> None:
+    repo = repo_factory()
+    manifest_path = repo / ".wt.yaml"
+    manifest_path.write_text(
+        manifest_path.read_text().replace(
+            "services: []", 'branch_template: "{type}/{shorthand}"\nservices: []'
+        )
+    )
+    subprocess.run(["git", "add", ".wt.yaml"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "branch template fixture"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    result = new_cmd.run(
+        start=repo,
+        shorthand="templated",
+        branch=branch,
+        branch_type=branch_type,
+        tenant=None,
+        skip_migrate=True,
+    )
+
+    target = tmp_path / "brain-app--templated"
+    actual = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert result == 0
+    assert actual == expected

@@ -32,9 +32,10 @@ Define a manifest at the project root (`.wt.yaml`) — see [brain-app's manifest
 
 ```bash
 wt status                                  # table of all worktrees
-wt new <shorthand> [<branch>] [--tenant X] # provision a fresh worktree
+wt new <shorthand> [<branch>] [--tenant X] [--type feat] # provision a worktree
 wt rm <shorthand>                          # tear down a single worktree
 wt rm <shorthand> --force                  # bypass safety refusals (stern confirm)
+wt rm <shorthand> --drop-db=<name>         # explicitly name a non-template DB
 wt rm --auto                               # scan all, prompt y/N per eligible
 wt rescue                                  # dry-run report of orphaned Claude state
 wt rescue --apply                          # move sessions + archive remaining state
@@ -48,6 +49,7 @@ wt tenant <shorthand> <name>               # repoint a worktree to a different t
 project: brain-app                # human label (defaults to repo dir name)
 worktree_prefix: brain-app--      # required — legacy sibling naming / shorthand
 worktree_root: ../brain-app--worktrees  # optional; relative to the primary root
+branch_template: "{type}/{shorthand}" # optional default branch for `wt new`
 
 services:
   - { name: backend,  default_port: 8000 }
@@ -67,6 +69,8 @@ db:                               # optional
 
 tenant:                           # optional — enables --tenant flag and `wt tenant`
   env_var: DEPLOYMENT_ROOT
+  identity_env: APP_TENANT        # optional; changed with env_var in the same file
+  identity_source: name           # field read from the package's manifest.yaml
   search_paths:
     - ~/dev/projects/whitespace/tenants
     - ~/dev/projects/whitespace/demo-data
@@ -100,6 +104,21 @@ and its parents as needed. When absent, the existing sibling layout is unchanged
 `git worktree list`, so old prefixed siblings and new root-contained worktrees can
 coexist without migration or transition state.
 
+When `branch_template` is present and the branch positional is omitted,
+`wt new foo` renders it with `type=feat` by default. `wt new foo --type fix`
+would therefore create `fix/foo` for the example above. An explicit branch
+positional always wins. Without `branch_template`, the branch remains the
+shorthand as before.
+
+`tenant.identity_env` and `tenant.identity_source` are an optional pair. When
+configured, `wt tenant` and `wt new --tenant` read `identity_source` from the
+selected package's `manifest.yaml` and atomically write `identity_env` beside
+`tenant.env_var`. For the current tenant/demo package schema the identity field
+is `name`; it must not be inferred from the package directory name. A missing,
+invalid, or unreadable field produces a loud warning and leaves the identity
+variable untouched. Omitting `identity_env` preserves the original path-only
+behavior. Dotted `identity_source` paths are supported for nested mappings.
+
 ### Placeholders
 
 Available inside `env_patches.set` values and `db.name_template`:
@@ -109,6 +128,8 @@ Available inside `env_patches.set` values and `db.name_template`:
 - `{<service>_port}` — one per service
 - `{tenant}`, `{tenant_path}` — name + resolved absolute path
 - `{project_root}` — repo root absolute path
+
+`branch_template` has its own two placeholders: `{type}` and `{shorthand}`.
 
 ## State model
 
@@ -138,8 +159,11 @@ a subdirectory launch beneath a live worktree.
 ## Safety semantics
 
 - **`wt rm` refuses** dirty / unpushed worktrees, branches without a resolved (merged or closed) PR, worktrees with any live process whose cwd is inside them, the primary worktree, and anything listed in `cleanup.protected`. The process refusal lists names and PIDs. A closed-without-merge PR is treated as a deliberate decision — the prompt surfaces a warning so you can verify the work is preserved elsewhere before confirming.
+- **Database use is not database ownership.** Before offering `dropdb`, `wt rm` renders `db.name_template` for the target shorthand and requires the imported `.env` database name to match exactly. A mismatch is shown as a loud pre-confirm warning and as `DB: <name> — NOT dropped`; worktree removal remains available. `--drop-db=<name>` is the deliberate override for this ownership test only.
+- **Cross-worktree database references are absolute holds.** A database referenced by any other worktree currently returned by `git worktree list`—including the primary—is never dropped. Neither `--force` nor `--drop-db` bypasses that refusal.
+- **Every database drop is insured.** Immediately before removal, `wt rm` streams `pg_dump` through `gzip` to `~/.wt-history/db-dumps/<db>-<YYYY-MM-DD-HHMMSS>.sql.gz`. A failed dump cancels only the DB drop, never silently proceeding without a backup. Each `wt rm` also deletes dump files older than 30 days.
 - **Squash-merges are recognised.** When the worktree's tip is exactly the resolved PR's head commit, `wt rm` trusts the merge and skips the upstream / unpushed-commit checks. That's the squash-merge path: GitHub squashes the branch into one new commit and auto-deletes the branch, so the original commits never land in `main`'s history and the remote branch (and its tracking ref, after a prune) is gone — which would otherwise read as "no upstream" and wrongly block a cleanly-merged worktree. A tip that has moved *past* the merged head still refuses (it carries un-captured local work).
 - **`wt rm` surfaces gitignored content** before the prompt — mockups, drafts, scratch notes the safety floor can't see — and prints a **cleanup checklist** reminding you to migrate folders (mockups, notes, exports) out before the directory is destroyed. Known regenerable junk (`node_modules`, `.venv`, `.next`, `__pycache__`, `.DS_Store`, `.env*`, etc.) is filtered from the gitignored sweep; extend it via `cleanup.gitignored_exclude`, and add project-specific checklist reminders via `cleanup.checklist`.
 - **`wt new` rolls back** the worktree + DB if any later step fails. The branch is left in place — re-running `wt new <shorthand>` picks it up. (Branches are cheap; deleting a ref that may have been pushed is not.)
-- **Claude state is move-only.** Neither normal removal, `--force`, nor `wt rescue --apply` overwrites or deletes session or memory files. If rescue itself fails, worktree removal aborts.
+- **Claude state is move-only.** Neither normal removal, `--force`, nor `wt rescue --apply` overwrites or deletes session or memory files. If rescue itself fails, worktree removal aborts. The subdirectory sweep excludes Claude keys that can be attributed to another existing sibling path or live git worktree, protecting against lossy path-munge collisions.
 - **`--force` is the deliberate escape hatch.** `wt rm <shorthand> --force` bypasses the dirty / unpushed / unmerged / live-process refusals, but only behind a stern gate: it prints every bypassed reason plus the cleanup checklist, then makes you **retype the worktree's exact name** to proceed (`--yes` does not skip this; on a non-interactive run it aborts and prints the `echo '<name>' | wt rm <name> --force` one-liner). Claude state rescue still runs first. The primary and `cleanup.protected` worktrees are never force-removable.

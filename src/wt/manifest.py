@@ -27,6 +27,8 @@ class DBConfig(BaseModel):
 class TenantConfig(BaseModel):
     env_var: str
     search_paths: list[str] = Field(default_factory=list)
+    identity_env: str | None = None
+    identity_source: str | None = None
 
 
 class CleanupConfig(BaseModel):
@@ -62,6 +64,7 @@ class Manifest(BaseModel):
     project: str | None = None
     worktree_prefix: str
     worktree_root: str | None = None
+    branch_template: str | None = None
     services: list[Service]
     env_patches: list[EnvPatch] = Field(default_factory=list)
     db: DBConfig | None = None

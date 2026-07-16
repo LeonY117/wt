@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -72,11 +73,22 @@ def rescue_worktree_state(
 
     root = projects_dir(home)
     if root.is_dir():
+        protected_munges = {
+            protected
+            for protected in _other_existing_path_munges(source, primary)
+            if protected == source_dir.name
+            or protected.startswith(f"{source_dir.name}-")
+        }
         descendants = sorted(
             candidate
             for candidate in root.iterdir()
             if candidate.is_dir()
             and candidate.name.startswith(f"{source_dir.name}-")
+            and not any(
+                candidate.name == protected
+                or candidate.name.startswith(f"{protected}-")
+                for protected in protected_munges
+            )
         )
         candidates.extend(descendants)
 
@@ -97,6 +109,43 @@ def rescue_worktree_state(
             )
         )
     return results
+
+
+def _other_existing_path_munges(source: Path, primary: Path) -> set[str]:
+    """Return Claude keys belonging to paths other than the removed worktree.
+
+    Claude's path munge is lossy: a sibling named ``<worktree>--served`` can
+    look like a subdirectory launch under ``<worktree>``. Protect both on-disk
+    siblings and every other worktree still reported by git.
+    """
+    source = source.expanduser().resolve()
+    paths: set[Path] = set()
+    try:
+        paths.update(
+            sibling.resolve()
+            for sibling in source.parent.iterdir()
+            if sibling.is_dir() and sibling.resolve() != source
+        )
+    except OSError:
+        pass
+
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=primary,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        result = None
+    if result is not None and result.returncode == 0:
+        for line in result.stdout.splitlines():
+            if line.startswith("worktree "):
+                path = Path(line.removeprefix("worktree ")).expanduser().resolve()
+                if path != source:
+                    paths.add(path)
+
+    return {munge_path(path) for path in paths}
 
 
 def rescue_project_dir(

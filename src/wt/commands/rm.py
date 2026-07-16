@@ -9,12 +9,15 @@ branches are refused.
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from rich.console import Console
 
 from ..claude_state import rescue_worktree_state
+from ..placeholders import render_db_name
 from ..project import Project
 from ..types import PRIMARY, Worktree
 
@@ -70,6 +73,18 @@ class CwdProcess:
     pid: int
     name: str
     cwd: Path
+
+
+@dataclass
+class DBRemovalPlan:
+    name: str | None
+    expected: str | None
+    explicit: bool = False
+    exists: bool = False
+    should_drop: bool = False
+    reason: str | None = None
+    ownership_warning: str | None = None
+    references: list[str] = field(default_factory=list)
 
 
 def _live_cwd_processes(path: Path) -> list[CwdProcess]:
@@ -340,6 +355,145 @@ def _db_exists(name: str) -> bool:
     return False
 
 
+def _plan_db_removal(
+    project: Project,
+    wt: Worktree,
+    *,
+    drop_db: str | None = None,
+    worktrees: list[Worktree] | None = None,
+) -> DBRemovalPlan:
+    """Decide whether a DB may be dropped, without mutating anything."""
+    name = drop_db if drop_db is not None else wt.db
+    expected = render_db_name(project.manifest, wt.shorthand)
+    plan = DBRemovalPlan(name=name, expected=expected, explicit=drop_db is not None)
+    if name is None:
+        return plan
+
+    ownership_matches = expected is not None and name == expected
+    if not ownership_matches:
+        expected_display = expected or "<no db.name_template configured>"
+        if plan.explicit:
+            plan.ownership_warning = (
+                f"DB {name} does not match this worktree (expected "
+                f"{expected_display}); explicit --drop-db override requested."
+            )
+        else:
+            plan.ownership_warning = (
+                f"DB {name} not owned by this worktree (expected {expected_display}); "
+                "drop manually if intended."
+            )
+        if not plan.explicit:
+            plan.reason = "ownership mismatch"
+            return plan
+
+    plan.exists = _db_exists(name)
+    if not plan.exists:
+        plan.reason = "not present"
+        return plan
+
+    if worktrees is None:
+        worktrees = project.worktrees()
+    target_path = Path(wt.path).resolve()
+    plan.references = [
+        other.shorthand
+        for other in worktrees
+        if other.db == name and Path(other.path).resolve() != target_path
+    ]
+    if plan.references:
+        plan.reason = "referenced by other worktree(s): " + ", ".join(plan.references)
+        return plan
+
+    plan.should_drop = True
+    return plan
+
+
+def _db_dump_dir(home: Path | None = None) -> Path:
+    return (home or Path.home()) / ".wt-history" / "db-dumps"
+
+
+def _dump_database(
+    name: str,
+    *,
+    home: Path | None = None,
+    now: datetime | None = None,
+) -> tuple[Path | None, str | None]:
+    """Stream ``pg_dump`` through ``gzip`` into the DB history directory."""
+    dump_dir = _db_dump_dir(home)
+    try:
+        dump_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return None, str(exc)
+    when = now or datetime.now()
+    safe_name = name.replace("/", "_")
+    destination = dump_dir / f"{safe_name}-{when:%Y-%m-%d-%H%M%S}.sql.gz"
+    while destination.exists():
+        when += timedelta(seconds=1)
+        destination = dump_dir / f"{safe_name}-{when:%Y-%m-%d-%H%M%S}.sql.gz"
+
+    temp_path: Path | None = None
+    dump: subprocess.Popen[bytes] | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=dump_dir, delete=False) as output:
+            temp_path = Path(output.name)
+            with tempfile.TemporaryFile() as pg_error:
+                dump = subprocess.Popen(
+                    ["pg_dump", "--dbname", name],
+                    stdout=subprocess.PIPE,
+                    stderr=pg_error,
+                )
+                assert dump.stdout is not None
+                gzip = subprocess.Popen(
+                    ["gzip"],
+                    stdin=dump.stdout,
+                    stdout=output,
+                    stderr=subprocess.PIPE,
+                )
+                dump.stdout.close()
+                _, gzip_stderr = gzip.communicate()
+                dump_returncode = dump.wait()
+                pg_error.seek(0)
+                dump_stderr = pg_error.read().decode(errors="replace").strip()
+
+        if dump_returncode != 0 or gzip.returncode != 0:
+            details = dump_stderr or (gzip_stderr or b"").decode(
+                errors="replace"
+            ).strip()
+            temp_path.unlink(missing_ok=True)
+            return None, details or "pg_dump/gzip exited unsuccessfully"
+        temp_path.replace(destination)
+        return destination, None
+    except OSError as exc:
+        if dump is not None and dump.poll() is None:
+            dump.terminate()
+            dump.wait()
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        return None, str(exc)
+
+
+def _expire_old_db_dumps(
+    *,
+    home: Path | None = None,
+    now: datetime | None = None,
+) -> list[Path]:
+    """Delete compressed DB dumps older than the 30-day retention window."""
+    dump_dir = _db_dump_dir(home)
+    if not dump_dir.is_dir():
+        return []
+    cutoff = (now or datetime.now()).timestamp() - timedelta(days=30).total_seconds()
+    removed: list[Path] = []
+    for dump in dump_dir.glob("*.sql.gz"):
+        try:
+            if dump.stat().st_mtime < cutoff:
+                dump.unlink()
+                removed.append(dump)
+        except OSError:
+            # Retention cleanup is best-effort and must not interfere with the
+            # safety decision for the DB associated with this removal.
+            continue
+    return removed
+
+
 def _remove_one(
     project: Project,
     wt: Worktree,
@@ -347,6 +501,8 @@ def _remove_one(
     *,
     force: bool = False,
     assume_yes: bool = False,
+    drop_db: str | None = None,
+    worktrees: list[Worktree] | None = None,
 ) -> bool:
     """Remove a single worktree + its DB. Returns True on success."""
     path = Path(wt.path)
@@ -360,12 +516,26 @@ def _remove_one(
             f"  [yellow]PR was closed without merging{when} — verify the work is "
             f"preserved elsewhere before confirming.[/yellow]"
         )
-    drop_db = False
-    if wt.db and _db_exists(wt.db):
-        console.print(f"  database: {wt.db} (will dropdb)")
-        drop_db = True
-    elif wt.db:
-        console.print(f"  database: [dim]{wt.db} (not present, will skip)[/dim]")
+    db_plan = _plan_db_removal(
+        project,
+        wt,
+        drop_db=drop_db,
+        worktrees=worktrees,
+    )
+    if db_plan.name is not None:
+        if db_plan.ownership_warning is not None:
+            console.print(
+                "  [bold red]WARNING: database name does not match this "
+                "worktree's db.name_template.[/bold red]"
+            )
+            console.print(f"  [yellow]{db_plan.ownership_warning}[/yellow]")
+        if db_plan.should_drop:
+            console.print(f"  database: {db_plan.name} (will dump, then dropdb)")
+        else:
+            console.print(
+                f"  DB: {db_plan.name} — NOT dropped "
+                f"({db_plan.reason or 'no database selected'})"
+            )
 
     # Gitignored content the safety floor doesn't see — mockups, drafts, scratch
     # notes — would be silently destroyed by `git worktree remove`. Surface the
@@ -401,6 +571,18 @@ def _remove_one(
         if ans not in {"y", "yes"}:
             console.print("[dim]skipped[/dim]")
             return False
+
+    if db_plan.should_drop and db_plan.name is not None:
+        dump_path, dump_error = _dump_database(db_plan.name)
+        if dump_path is None:
+            db_plan.should_drop = False
+            db_plan.reason = f"insurance dump failed: {dump_error or 'unknown error'}"
+            err.print(
+                f"  [bold red]DB: {db_plan.name} — NOT dropped "
+                f"({db_plan.reason})[/bold red]"
+            )
+        else:
+            console.print(f"  [green]✓[/green] database dump saved to {dump_path}")
 
     # Claude Code keys sessions and memory by the worktree's absolute path.
     # Rescue that state before the directory disappears, even under --force.
@@ -446,10 +628,10 @@ def _remove_one(
         return False
     console.print("  [green]✓[/green] worktree removed")
 
-    if drop_db and wt.db:
-        rd = subprocess.run(["dropdb", wt.db], capture_output=True, text=True)
+    if db_plan.should_drop and db_plan.name is not None:
+        rd = subprocess.run(["dropdb", db_plan.name], capture_output=True, text=True)
         if rd.returncode == 0:
-            console.print(f"  [green]✓[/green] dropped {wt.db}")
+            console.print(f"  [green]✓[/green] dropped {db_plan.name}")
         else:
             err.print(f"  [yellow]warning:[/yellow] dropdb failed: {rd.stderr.strip()}")
 
@@ -459,7 +641,11 @@ def _remove_one(
 
 
 def run_one(
-    start: Path, shorthand: str, assume_yes: bool = False, force: bool = False
+    start: Path,
+    shorthand: str,
+    assume_yes: bool = False,
+    force: bool = False,
+    drop_db: str | None = None,
 ) -> int:
     """Remove one specific worktree by shorthand. Same safety checks as --auto.
 
@@ -468,7 +654,9 @@ def run_one(
     `cleanup.protected` worktrees are never force-removable — those refusals stand.
     """
     project = Project.discover(start)
-    wt = project.find(shorthand)
+    _expire_old_db_dumps()
+    worktrees = project.worktrees()
+    wt = project.find(shorthand, worktrees)
     if wt is None:
         err.print(f"[red]error:[/red] no worktree {shorthand!r} found on disk.")
         return 2
@@ -504,17 +692,27 @@ def run_one(
         )
         return 1
 
-    ok = _remove_one(project, wt, checks, force=force, assume_yes=assume_yes)
+    ok = _remove_one(
+        project,
+        wt,
+        checks,
+        force=force,
+        assume_yes=assume_yes,
+        drop_db=drop_db,
+        worktrees=worktrees,
+    )
     return 0 if ok else 1
 
 
 def run_auto(start: Path) -> int:
     """Scan all worktrees, prompt y/N per eligible one. The bash-script flow."""
     project = Project.discover(start)
+    _expire_old_db_dumps()
 
     console.print("scanning worktrees…\n")
     eligible: list[tuple[Worktree, WorktreeChecks]] = []
-    for wt in project.worktrees():
+    worktrees = project.worktrees()
+    for wt in worktrees:
         if wt.shorthand == PRIMARY:
             console.print(f"  [dim]skip[/dim]  {wt.path}  [dim](primary)[/dim]")
             continue
@@ -543,7 +741,7 @@ def run_auto(start: Path) -> int:
     console.print(f"{len(eligible)} worktree(s) eligible for removal.")
 
     for wt, checks in eligible:
-        _remove_one(project, wt, checks)
+        _remove_one(project, wt, checks, worktrees=worktrees)
 
     console.print()
     console.print("done.")

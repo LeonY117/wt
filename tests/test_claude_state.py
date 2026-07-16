@@ -132,3 +132,37 @@ def test_worktree_rescue_includes_subdirectory_launched_state(tmp_path: Path) ->
         history
         / "brain-app-feature-backend-2026-07-15/memory/MEMORY.md"
     ).exists()
+
+
+def test_worktree_rescue_skips_lossy_munge_collision_with_existing_sibling(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    source = tmp_path / "brain-app--feature"
+    sibling = tmp_path / "brain-app--feature--served"
+    primary = tmp_path / "brain-app"
+    source.mkdir()
+    sibling.mkdir()
+    primary.mkdir()
+    backend_state = project_dir(source / "backend", home)
+    sibling_state = project_dir(sibling, home)
+    for state, session in (
+        (backend_state, "backend.jsonl"),
+        (sibling_state, "sibling.jsonl"),
+    ):
+        state.mkdir(parents=True)
+        (state / session).write_text(session)
+
+    results = rescue_worktree_state(
+        source=source,
+        primary=primary,
+        project="brain-app",
+        shorthand="feature",
+        home=home,
+        on_date=TODAY,
+    )
+
+    assert len(results) == 1
+    assert results[0].source == backend_state
+    assert (project_dir(primary, home) / "backend.jsonl").exists()
+    assert (sibling_state / "sibling.jsonl").exists()

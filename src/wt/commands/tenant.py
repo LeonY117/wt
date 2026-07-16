@@ -11,7 +11,7 @@ from ..envfile import patch_env
 from ..placeholders import build_context, resolve
 from ..ports import is_port_bound
 from ..project import Project
-from ..tenant import list_tenants, resolve_tenant
+from ..tenant import list_tenants, resolve_tenant, tenant_identity_from_path
 from ..types import PRIMARY
 
 
@@ -69,6 +69,11 @@ def set_run(start: Path, shorthand: str, tenant: str) -> int:
         return 2
 
     old_tenant = wt.tenant
+    tenant_identity, identity_warning = tenant_identity_from_path(
+        manifest, tenant_path
+    )
+    if identity_warning is not None:
+        err.print(f"[bold red]WARNING:[/bold red] {identity_warning}.")
 
     # Re-apply only the env patches that touch tenant placeholders. We re-render
     # all patches but only write keys whose resolved value differs — keeps the
@@ -83,6 +88,7 @@ def set_run(start: Path, shorthand: str, tenant: str) -> int:
         tenant_path=str(tenant_path),
     )
     worktree_path = Path(wt.path)
+    tenant_writes: list[tuple[Path, str, str]] = []
     for patch in manifest.env_patches:
         target = worktree_path / patch.file
         if not target.exists():
@@ -92,14 +98,42 @@ def set_run(start: Path, shorthand: str, tenant: str) -> int:
             if "{tenant" not in template:
                 continue
             updates[key] = resolve(template, context)
+        if (
+            manifest.tenant.identity_env is not None
+            and manifest.tenant.env_var in updates
+        ):
+            updates.pop(manifest.tenant.identity_env, None)
+            if tenant_identity is not None:
+                updates[manifest.tenant.identity_env] = tenant_identity
         if updates:
             patch_env(target, updates)
+            if manifest.tenant.env_var in updates:
+                tenant_writes.append(
+                    (target, manifest.tenant.env_var, updates[manifest.tenant.env_var])
+                )
+                if (
+                    manifest.tenant.identity_env is not None
+                    and manifest.tenant.identity_env in updates
+                ):
+                    tenant_writes.append(
+                        (
+                            target,
+                            manifest.tenant.identity_env,
+                            updates[manifest.tenant.identity_env],
+                        )
+                    )
 
     console.print(
         f"[green]✓[/green] {shorthand}: tenant "
         f"[yellow]{old_tenant or '—'}[/yellow] → [yellow]{tenant}[/yellow]"
     )
-    console.print(f"  path: {tenant_path}")
+    if manifest.tenant.identity_env is None:
+        console.print(f"  path: {tenant_path}")
+    else:
+        for target, key, value in tenant_writes:
+            console.print(
+                f"  wrote {target.relative_to(worktree_path)}: {key}={value}"
+            )
 
     # Warn if backend is currently bound — running process won't pick up the
     # new DEPLOYMENT_ROOT until restarted.

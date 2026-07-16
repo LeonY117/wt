@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 from .manifest import Manifest
 
 
@@ -44,3 +46,51 @@ def tenant_name_from_path(manifest: Manifest, path: str | None) -> str | None:
     # Not under a known search path; fall back to basename so something useful
     # shows up in `wt status`.
     return target.name if target.exists() else None
+
+
+def tenant_identity_from_path(
+    manifest: Manifest, path: Path
+) -> tuple[str | None, str | None]:
+    """Read the configured tenant identity from a package manifest.
+
+    Returns ``(value, warning)``. The caller must leave the identity env var
+    untouched when ``warning`` is present: guessing from a package directory
+    name is unsafe because package names and tenant identities can differ.
+    ``identity_source`` supports dotted mappings for manifests that nest the
+    identity field.
+    """
+    config = manifest.tenant
+    if config is None or config.identity_env is None:
+        return None, None
+    if not config.identity_source:
+        return None, (
+            "tenant.identity_env is configured without tenant.identity_source; "
+            f"{config.identity_env} was left unchanged"
+        )
+
+    package_manifest = path / "manifest.yaml"
+    try:
+        with package_manifest.open() as f:
+            data = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return None, (
+            f"could not read tenant identity from {package_manifest}: {exc}; "
+            f"{config.identity_env} was left unchanged"
+        )
+
+    value: object = data
+    for part in config.identity_source.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return None, (
+                f"tenant identity field {config.identity_source!r} is missing from "
+                f"{package_manifest}; {config.identity_env} was left unchanged"
+            )
+        value = value[part]
+
+    if not isinstance(value, str) or not value.strip():
+        return None, (
+            f"tenant identity field {config.identity_source!r} in "
+            f"{package_manifest} is not a non-empty string; "
+            f"{config.identity_env} was left unchanged"
+        )
+    return value, None

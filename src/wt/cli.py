@@ -50,13 +50,19 @@ def new(
     shorthand: str = typer.Argument(..., help="Shorthand for the new worktree."),
     branch: str | None = typer.Argument(
         None,
-        help="Branch to check out. Defaults to <shorthand>; created from HEAD if it doesn't exist.",
+        help="Branch to check out. Defaults via branch_template, then <shorthand>; "
+        "created from HEAD if it doesn't exist.",
     ),
     tenant: str | None = typer.Option(
         None,
         "--tenant",
         "-t",
         help="Tenant to point DEPLOYMENT_ROOT at. Defaults to the primary's tenant.",
+    ),
+    branch_type: str = typer.Option(
+        "feat",
+        "--type",
+        help="Value for {type} when branch_template supplies the default branch.",
     ),
     skip_migrate: bool = typer.Option(
         False, "--skip-migrate", help="Don't run the db migrate command."
@@ -68,6 +74,7 @@ def new(
             start=Path.cwd(),
             shorthand=shorthand,
             branch=branch,
+            branch_type=branch_type,
             tenant=tenant,
             skip_migrate=skip_migrate,
         )
@@ -98,6 +105,12 @@ def rm(
         "retype-the-name confirmation. Cannot force the primary or "
         "cleanup.protected worktrees.",
     ),
+    drop_db: str | None = typer.Option(
+        None,
+        "--drop-db",
+        help="Explicit DB name to drop. Bypasses ownership matching only; never "
+        "bypasses another worktree's reference.",
+    ),
 ) -> None:
     """Rescue Claude state, then safely remove a worktree and its DB."""
     try:
@@ -108,12 +121,21 @@ def rm(
             if force:
                 _die("--force only applies to a single <shorthand>, not --auto.")
                 return
+            if drop_db is not None:
+                _die("--drop-db only applies to a single <shorthand>, not --auto.")
+                return
             rc = rm_cmd.run_auto(Path.cwd())
         else:
             if shorthand is None:
                 _die("pass a <shorthand> or use --auto.")
                 return
-            rc = rm_cmd.run_one(Path.cwd(), shorthand, assume_yes=yes, force=force)
+            rc = rm_cmd.run_one(
+                Path.cwd(),
+                shorthand,
+                assume_yes=yes,
+                force=force,
+                drop_db=drop_db,
+            )
     except FileNotFoundError as e:
         _die(str(e))
         return

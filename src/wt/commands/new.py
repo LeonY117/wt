@@ -15,7 +15,7 @@ from ..manifest import EnvPatch, Manifest
 from ..placeholders import build_context, render_db_name, resolve
 from ..ports import allocate_port
 from ..project import Project
-from ..tenant import resolve_tenant, tenant_name_from_path
+from ..tenant import resolve_tenant, tenant_identity_from_path
 from ..types import PRIMARY
 
 
@@ -77,8 +77,14 @@ def _resolve_env_source(
 
 
 def _apply_env_patches(
-    *, manifest: Manifest, primary: Path, worktree: Path, context: dict[str, str]
-) -> None:
+    *,
+    manifest: Manifest,
+    primary: Path,
+    worktree: Path,
+    context: dict[str, str],
+    tenant_identity: str | None = None,
+) -> list[tuple[Path, str, str]]:
+    tenant_writes: list[tuple[Path, str, str]] = []
     for patch in manifest.env_patches:
         target = worktree / patch.file
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -89,7 +95,38 @@ def _apply_env_patches(
             else:
                 target.touch()
         updates = {key: resolve(value, context) for key, value in patch.set.items()}
+        tenant_config = manifest.tenant
+        if (
+            tenant_config is not None
+            and tenant_config.identity_env is not None
+            and tenant_config.env_var in updates
+        ):
+            # An identity configured for package-manifest lookup must never be
+            # guessed from another placeholder (notably the package name).
+            updates.pop(tenant_config.identity_env, None)
+            if tenant_identity is not None:
+                updates[tenant_config.identity_env] = tenant_identity
         patch_env(target, updates)
+        if (
+            tenant_config is not None
+            and tenant_config.identity_env is not None
+            and tenant_config.env_var in updates
+        ):
+            tenant_writes.append(
+                (target, tenant_config.env_var, updates[tenant_config.env_var])
+            )
+            if (
+                tenant_config.identity_env is not None
+                and tenant_config.identity_env in updates
+            ):
+                tenant_writes.append(
+                    (
+                        target,
+                        tenant_config.identity_env,
+                        updates[tenant_config.identity_env],
+                    )
+                )
+    return tenant_writes
 
 
 def _migrate_env(manifest: Manifest, worktree: Path) -> dict[str, str]:
@@ -125,6 +162,7 @@ def run(
     start: Path,
     shorthand: str,
     branch: str | None,
+    branch_type: str = "feat",
     tenant: str | None,
     skip_migrate: bool = False,
 ) -> int:
@@ -157,7 +195,14 @@ def run(
         return 2
 
     # ---- resolve branch ----
-    branch = branch or shorthand
+    if branch is None:
+        if manifest.branch_template is None:
+            branch = shorthand
+        else:
+            branch = resolve(
+                manifest.branch_template,
+                {"type": branch_type, "shorthand": shorthand},
+            )
     create_branch = not _branch_exists(primary, branch)
 
     # ---- resolve tenant ----
@@ -186,6 +231,14 @@ def run(
             "in .wt.yaml."
         )
         return 2
+
+    tenant_identity: str | None = None
+    if tenant_path is not None:
+        tenant_identity, identity_warning = tenant_identity_from_path(
+            manifest, Path(tenant_path)
+        )
+        if identity_warning is not None:
+            err.print(f"[bold red]WARNING:[/bold red] {identity_warning}.")
 
     # ---- allocate ports ----
     ports: dict[str, int] = {}
@@ -242,12 +295,15 @@ def run(
             tenant=tenant_name,
             tenant_path=tenant_path,
         )
-        _apply_env_patches(
+        tenant_writes = _apply_env_patches(
             manifest=manifest,
             primary=primary,
             worktree=target_path,
             context=context,
+            tenant_identity=tenant_identity,
         )
+        for target, key, value in tenant_writes:
+            console.print(f"  wrote {target.relative_to(target_path)}: {key}={value}")
 
         # ---- step 4: migrate ----
         if not skip_migrate:

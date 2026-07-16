@@ -35,6 +35,7 @@ No persistent registry. `Project.worktrees()` is the single read API — it walk
 - **Disk is the source of truth.** Don't add a side index, cache, or registry. If a command needs to know about a worktree, derive it from `git worktree list` + env files via `Project.worktrees()`.
 - **Mixed worktree locations are normal.** `worktree_root` affects only the target of `wt new`; discovery and every later command remain based on `git worktree list`. Do not add migration or old/new transition logic.
 - **Claude state is move-only.** Before removing a worktree, rescue Claude project dirs for both its root and subdirectory launches: move top-level `*.jsonl` sessions to the primary project dir without overwriting, then move all remaining state to `~/.wt-history/claude-state/`. Never unlink session or memory files, including under `--force`; an empty project directory may be removed.
+- **DB use is not ownership.** A worktree's imported `.env` DB is only a reference. `wt rm` may auto-drop it only when it exactly matches `db.name_template` rendered for that shorthand and no other live worktree references it. `--drop-db=<name>` bypasses only the ownership match; cross-worktree references are never bypassable, including under `--force`. Every actual drop requires a successful compressed dump under `~/.wt-history/db-dumps/`, retained for 30 days.
 - **Refuse by default; force is a stern, deliberate escape hatch.** `wt rm` mirrors the old bash script's safety floor. `wt rm --force` exists for the cases the floor can't anticipate, but it's gated behind a retype-the-worktree-name confirmation (see `_confirm_force`) — not a casual `--yes`. The primary and `cleanup.protected` worktrees are never force-removable; keep it that way. `wt new` still rolls back on failure rather than leaving half-provisioned state.
 - **Trust the resolved PR over git's view of merge state.** Squash-merges leave the branch's commits out of `main`'s history and (after the remote branch is deleted + pruned) strip the upstream ref. `_check` keys off the `gh` PR state plus a tip-equals-PR-head test (`tip_is_pr_head`), not `git branch --merged`, so a clean squash-merge isn't mistaken for unmerged/unpushed work.
 - **Manifest-driven.** Every project-specific behaviour goes through `.wt.yaml`. If brain-app needs special handling that wouldn't fit any other project, push back on the design before hard-coding it.
@@ -56,6 +57,33 @@ the prefix and creates missing parent directories. Without it, the target remain
 from the primary worktree root. Existing worktrees in either layout are handled
 together through git discovery.
 
+Default branch naming is optionally manifest-driven:
+
+```yaml
+branch_template: "{type}/{shorthand}"
+```
+
+When the branch positional is omitted, `wt new` renders this with `--type`
+(default `feat`) and the worktree shorthand. An explicit branch positional
+always wins. Without the key, the shorthand remains the branch name.
+
+Tenant identity switching is also optional and manifest-driven:
+
+```yaml
+tenant:
+  env_var: DEPLOYMENT_ROOT
+  identity_env: APP_TENANT
+  identity_source: name
+  search_paths: [...]
+```
+
+When `identity_env` is present, both `wt tenant` and `wt new --tenant` read
+`identity_source` from the selected package's `manifest.yaml` and write the
+path and identity in the same env-file patch. Current tenant and demo packages
+use top-level `name`. Never derive identity from a package directory name. If
+the field is absent, invalid, or unreadable, warn loudly and leave the identity
+variable untouched. With no `identity_env`, retain the existing path-only flow.
+
 ## Removal and rescue
 
 `wt rm` refuses when `lsof -a -d cwd` finds a live process rooted anywhere
@@ -63,11 +91,23 @@ inside the target worktree and prints the process name/PID. `--force` can bypass
 that reason only through the existing retype gate. After confirmation and before
 `git worktree remove`, Claude state rescue always runs, including under force.
 
+The removal plan must render the target's expected DB name before confirmation,
+warn loudly on any mismatch, and print a `DB: <name> — NOT dropped (reason)`
+line for skipped drops. A DB referenced by another disk-derived worktree is
+never dropped. `--drop-db=<name>` is allowed only for a single-worktree removal
+and bypasses ownership matching, not cross-reference safety. Before `dropdb`,
+`pg_dump | gzip` must succeed; expiry cleanup removes dumps older than 30 days.
+
 `wt rescue` scans Claude project directories matching the primary's munged path
 prefix and determines orphanhood by excluding the munged primary, every path
 currently returned by `git worktree list`, and every project dir prefixed by a
 live worktree (a subdirectory launch). It is a dry run unless `--apply` is passed.
 Apply uses the same move-and-archive primitive as `wt rm`.
+
+The normal removal subdirectory sweep must also exclude candidates attributable
+to another existing path despite Claude's lossy path munging. Check on-disk
+siblings of the removed worktree and all live git worktrees; protect both an
+exact munged match and its subdirectory-prefixed keys.
 
 ## Adding a command
 
