@@ -22,14 +22,13 @@ def is_port_bound(port: int) -> bool:
 
 
 def allocate_port(used: Iterable[int], default: int) -> int:
-    """Pick the next free port given a set/iterable of already-used ports.
+    """Pick the lowest free port at or above ``default``.
 
-    Strategy: highest in `used` + 1; if that port is bound by some other
-    process, skip until a free one is found. If `used` is empty, start from
-    `default`.
+    Ports assigned to other worktrees and ports bound by unrelated processes
+    are skipped. Gaps left by removed worktrees are reused.
     """
     used_set = set(used)
-    candidate = max(used_set) + 1 if used_set else default
+    candidate = default
     while candidate in used_set or is_port_bound(candidate):
         candidate += 1
         if candidate > 65535:
