@@ -10,6 +10,7 @@ from rich.table import Table
 from ..importer import derive_worktrees
 from ..ports import is_port_bound
 from ..project import Project
+from ..served import farm_dir
 from ..types import PRIMARY, Worktree
 
 
@@ -19,6 +20,22 @@ def _running_cell(wt: Worktree) -> str:
         mark = "[green]✓[/green]" if is_port_bound(port) else "[dim]✗[/dim]"
         parts.append(f"{service[:2]}{mark}")
     return " ".join(parts) if parts else "—"
+
+
+def _served_cell(project: Project, wt: Worktree) -> str:
+    """Where this worktree's app reads served data from, and how much is there."""
+    config = project.manifest.served_data
+    if config is None or wt.served_root is None:
+        return "[dim]—[/dim]"
+    root = Path(wt.served_root)
+    tables = (
+        len([c for c in root.iterdir() if c.is_dir() and not c.name.startswith(".")])
+        if root.is_dir()
+        else 0
+    )
+    if root == farm_dir(config, Path(wt.path)):
+        return f"[green]farm {tables}[/green]"
+    return f"[dim]snapshot {tables}[/dim]"
 
 
 def _branch_cell(branch: str | None) -> str:
@@ -50,6 +67,8 @@ def run(start: Path) -> int:
     table.add_column("db", style="magenta")
     if project.manifest.tenant is not None:
         table.add_column("tenant", style="yellow")
+    if project.manifest.served_data is not None:
+        table.add_column("served")
     table.add_column("running")
 
     for wt in rows:
@@ -60,6 +79,8 @@ def run(start: Path) -> int:
         cells.append(wt.db or "[dim]—[/dim]")
         if project.manifest.tenant is not None:
             cells.append(wt.tenant or "[dim]—[/dim]")
+        if project.manifest.served_data is not None:
+            cells.append(_served_cell(project, wt))
         cells.append(_running_cell(wt))
         table.add_row(*cells)
 

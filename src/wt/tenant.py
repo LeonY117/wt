@@ -9,6 +9,20 @@ import yaml
 from .manifest import Manifest
 
 
+def _is_served_sibling(manifest: Manifest, path: Path) -> bool:
+    """True for `<package><served_suffix>` next to a real `<package>`.
+
+    A served snapshot lives beside its package in the same search path, so it
+    would otherwise be listed and selectable as a tenant in its own right.
+    Requiring the package to exist keeps a genuinely-named tenant listable.
+    """
+    config = manifest.served_data
+    if config is None or not path.name.endswith(config.served_suffix):
+        return False
+    package = path.parent / path.name[: -len(config.served_suffix)]
+    return package.is_dir()
+
+
 def list_tenants(manifest: Manifest) -> list[tuple[str, Path]]:
     """Return [(name, absolute_path), ...] across all configured search paths."""
     out: list[tuple[str, Path]] = []
@@ -20,6 +34,8 @@ def list_tenants(manifest: Manifest) -> list[tuple[str, Path]]:
             if not child.is_dir():
                 continue
             if child.name.startswith(".") or child.name.startswith("_"):
+                continue
+            if _is_served_sibling(manifest, child):
                 continue
             if child.name in seen:
                 continue

@@ -543,7 +543,15 @@ def _remove_one(
     # confirming. Doesn't block removal; informational + included in the prompt
     # context so a careless `y` after seeing the list is still the caller's
     # call.
-    ignored = _gitignored_content(path, project.manifest.cleanup.gitignored_exclude)
+    # The served-data farm is regenerable by definition — it is nothing but
+    # symlinks `wt served` rebuilds — so it must not be listed as content at
+    # risk of being destroyed.
+    ignored_excludes = list(project.manifest.cleanup.gitignored_exclude)
+    if project.manifest.served_data is not None:
+        ignored_excludes.append(
+            Path(project.manifest.served_data.farm_dir).parts[0]
+        )
+    ignored = _gitignored_content(path, ignored_excludes)
     if ignored:
         console.print(
             f"  [yellow]gitignored content ({len(ignored)} entr"

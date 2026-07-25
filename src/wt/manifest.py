@@ -31,6 +31,28 @@ class TenantConfig(BaseModel):
     identity_source: str | None = None
 
 
+class ServedDataConfig(BaseModel):
+    """Local served-data farm (see `wt.served`).
+
+    `farm_dir` is worktree-relative. Its basename may be load-bearing for the
+    app reading it — brain-app's data plane rejects any served root not named
+    `data` — so change it only against that app's own rule.
+    """
+
+    # Env var the app reads for its served-data root.
+    env_var: str
+    # Worktree-relative env file the farm path is written to.
+    env_file: str = ".env"
+    # Worktree-relative farm location.
+    farm_dir: str = ".local-served/data"
+    # Suffix naming the served sibling of a tenant package directory.
+    served_suffix: str = "--served"
+    # Subdirectory holding tables, in both the package and the served sibling.
+    data_subdir: str = "data"
+    # A table directory without this file is not a table. None disables pruning.
+    require_file: str | None = "data.parquet"
+
+
 class CleanupConfig(BaseModel):
     protected: list[str] = Field(default_factory=list)
     # Substrings (matched against each gitignored path) added to the built-in
@@ -69,6 +91,7 @@ class Manifest(BaseModel):
     env_patches: list[EnvPatch] = Field(default_factory=list)
     db: DBConfig | None = None
     tenant: TenantConfig | None = None
+    served_data: ServedDataConfig | None = None
     cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
     import_hints: ImportHints = Field(default_factory=ImportHints)
 

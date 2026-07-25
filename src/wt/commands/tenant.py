@@ -13,6 +13,7 @@ from ..ports import is_port_bound
 from ..project import Project
 from ..tenant import list_tenants, resolve_tenant, tenant_identity_from_path
 from ..types import PRIMARY
+from . import served as served_cmd
 
 
 console = Console()
@@ -134,6 +135,13 @@ def set_run(start: Path, shorthand: str, tenant: str) -> int:
             console.print(
                 f"  wrote {target.relative_to(worktree_path)}: {key}={value}"
             )
+
+    # Rebuild the served-data farm against the NEW tenant. Skipping this would
+    # leave the worktree serving the previous tenant's tables from a farm that
+    # DEPLOYMENT_ROOT no longer agrees with.
+    served_cmd.apply_and_report(
+        manifest, worktree=worktree_path, tenant_path=str(tenant_path)
+    )
 
     # Warn if backend is currently bound — running process won't pick up the
     # new DEPLOYMENT_ROOT until restarted.

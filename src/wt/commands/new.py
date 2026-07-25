@@ -17,6 +17,7 @@ from ..ports import allocate_port
 from ..project import Project
 from ..tenant import resolve_tenant, tenant_identity_from_path
 from ..types import PRIMARY
+from . import served as served_cmd
 
 
 console = Console()
@@ -305,7 +306,14 @@ def run(
         for target, key, value in tenant_writes:
             console.print(f"  wrote {target.relative_to(target_path)}: {key}={value}")
 
-        # ---- step 4: migrate ----
+        # ---- step 4: served-data farm ----
+        # After the env patches (so DEPLOYMENT_ROOT is settled) and before
+        # migrate. Non-fatal by design — see `served_cmd.apply_and_report`.
+        served_cmd.apply_and_report(
+            manifest, worktree=target_path, tenant_path=tenant_path
+        )
+
+        # ---- step 5: migrate ----
         if not skip_migrate:
             _run_migrate(manifest, target_path)
         else:

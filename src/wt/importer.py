@@ -70,6 +70,16 @@ def infer_worktree(project: Project, *, path: Path, branch: str | None) -> Workt
             tenant_path = str(Path(raw_path).expanduser().resolve())
             tenant_name = tenant_name_from_path(manifest, raw_path)
 
+    # Served-data root. Not an import_hint: `served_data` declares the exact
+    # file and key it writes, so there is nothing to guess.
+    served_root: str | None = None
+    if manifest.served_data is not None:
+        raw_served = env_for(manifest.served_data.env_file).get(
+            manifest.served_data.env_var
+        )
+        if raw_served:
+            served_root = str(Path(raw_served).expanduser())
+
     return Worktree(
         shorthand=shorthand,
         path=str(path.resolve()),
@@ -78,6 +88,7 @@ def infer_worktree(project: Project, *, path: Path, branch: str | None) -> Workt
         db=db_name,
         tenant=tenant_name,
         tenant_path=tenant_path,
+        served_root=served_root,
     )
 
 
