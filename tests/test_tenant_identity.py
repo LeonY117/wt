@@ -149,3 +149,44 @@ def test_new_with_tenant_writes_path_and_manifest_identity(
         "DEPLOYMENT_ROOT": str(package.resolve()),
         "APP_TENANT": "kfd",
     }
+
+
+def test_tenant_switch_warns_about_a_data_root_left_on_the_old_tenant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The invariant the retired farm used to hold by rewriting the variable.
+
+    wt no longer writes a served root, so it can no longer correct one either
+    — but a worktree provisioned before the farm was retired still carries one,
+    pinned to the tenant it was built against. Switching tenants on top of that
+    silently serves the previous customer's tables, so it has to be loud.
+    """
+    project, worktree, package = _tenant_project(
+        tmp_path, package_manifest={"name": "kfd"}
+    )
+    old_package = tmp_path / "tenants" / "warwick-prod"
+    (old_package / "data" / "invoices").mkdir(parents=True)
+    farm = worktree / ".local-served" / "data"
+    farm.mkdir(parents=True)
+    (farm / "invoices").symlink_to(old_package / "data" / "invoices")
+    (worktree / ".env").write_text(
+        f"DEPLOYMENT_ROOT={old_package}\nAPP_TENANT=warwick\n"
+        f"SERVED_DATA_ROOT={farm}\n"
+    )
+    project.find = lambda shorthand: Worktree(
+        shorthand="data-tab",
+        path=str(worktree),
+        tenant="warwick-prod",
+        tenant_path=str(old_package),
+    )
+    monkeypatch.setattr(tenant_cmd.Project, "discover", lambda start: project)
+    monkeypatch.setattr(tenant_cmd, "is_port_bound", lambda port: False)
+
+    result = tenant_cmd.set_run(tmp_path, "data-tab", "kingfisher-prod")
+
+    assert result == 0
+    err = capsys.readouterr().err.replace("\n", "")
+    assert ".env:SERVED_DATA_ROOT" in err  # the key, never its value
+    assert "warwick-prod" in err
+    # the switch itself still lands
+    assert read_env(worktree / ".env")["DEPLOYMENT_ROOT"] == str(package.resolve())

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Service(BaseModel):
@@ -39,6 +39,12 @@ class ServedDataConfig(BaseModel):
     points at it. wt's only two stakes are keeping `<package><suffix>` out of
     the tenant list, and reporting the vintage in `wt status`.
     """
+
+    # Extras are REJECTED, not ignored: the retired keys (env_var, farm_dir,
+    # …) are the signature of a manifest whose worktrees still carry a
+    # served-root pin, and silently accepting them would also let a custom
+    # `served_suffix` load as the default and point wt at the wrong sibling.
+    model_config = ConfigDict(extra="forbid")
 
     # Suffix naming the served sibling of a tenant package directory.
     suffix: str = "--served"

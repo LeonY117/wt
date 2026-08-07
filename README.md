@@ -136,7 +136,8 @@ behavior. Dotted `identity_source` paths are supported for nested mappings.
 Some apps read their tables from a "served" tree kept as a `--served` sibling of
 the tenant package — in production a pull worker materialises it there. With
 `served_data` configured, `wt status` reports that tree's vintage and table
-count, and `wt tenants` hides the sibling so `warwick-prod--served` isn't
+count (via each worktree's tenant package, so it needs `import_hints.tenant`
+too), and `wt tenants` hides the sibling so `warwick-prod--served` isn't
 selectable as a tenant beside `warwick-prod`. (A directory merely *ending* in
 the suffix with no package beside it stays listable.)
 
@@ -148,9 +149,18 @@ vintage per tenant, shared by every worktree.
 
 `wt` used to build a per-worktree symlink farm here, unioning the package tree
 over the snapshot. It shipped stale data silently — package copies shadowed
-every table a fresh pull had just updated — and it is gone. A worktree that
-still carries a hand-set served-root env var keeps it: nothing overwrites that
-any more.
+every table a fresh pull had just updated — and it is gone, along with the
+served-root env var `wt` used to write into each worktree.
+
+Worktrees provisioned before that still carry the variable, and it outranks the
+app's default. `wt` no longer writes it, so it can no longer correct it either:
+`wt tenant` warns when a worktree's env still points at data fed by the tenant
+it is switching *away* from, but clearing those lines is a one-time job for
+whoever owns the worktrees. A `served_data:` block still carrying the retired
+keys (`env_var`, `env_file`, `farm_dir`, `require_file`, `served_suffix`) is
+rejected rather than ignored — it is the signature of exactly that situation,
+and a stale `served_suffix` would otherwise load as the default and point `wt`
+at the wrong sibling.
 
 ### Placeholders
 

@@ -30,16 +30,29 @@ def _running_cell(wt: Worktree) -> str:
     return " ".join(parts) if parts else "—"
 
 
+def _stamped(root: Path) -> datetime | None:
+    """The UTC stamp in the tree name this root points at, if it parses.
+
+    Digit-shaped is not the same as valid (`20261332T000000Z` matches the
+    pattern and is not a date) — a publisher's odd directory name must not
+    take the whole status table down with it.
+    """
+    m = _STAMP_RE.search(os.readlink(root) if root.is_symlink() else "")
+    if m is None:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y%m%dT%H%M%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
+
+
 def _vintage(root: Path) -> str:
     """How old the served snapshot is — from the tree it points at, else mtime."""
-    m = _STAMP_RE.search(os.readlink(root) if root.is_symlink() else "")
-    when = (
-        datetime.strptime(m.group(1), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
-        if m
-        else datetime.fromtimestamp(root.stat().st_mtime, timezone.utc)
-    )
+    when = _stamped(root) or datetime.fromtimestamp(root.stat().st_mtime, timezone.utc)
     days = (datetime.now(timezone.utc) - when).days
-    return f"{days}d" if days else "<1d"
+    return f"{days}d" if days > 0 else "<1d"
 
 
 def _served_cell(project: Project, wt: Worktree) -> str:
