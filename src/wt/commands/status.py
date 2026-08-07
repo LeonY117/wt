@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from rich.console import Console
@@ -10,8 +13,13 @@ from rich.table import Table
 from ..importer import derive_worktrees
 from ..ports import is_port_bound
 from ..project import Project
-from ..served import farm_dir
+from ..tenant import served_root
 from ..types import PRIMARY, Worktree
+
+
+# `<anything>-<UTC stamp>-<hash>` — the snapshot naming both the app's pull
+# worker and `sys serve` use for a materialised tree.
+_STAMP_RE = re.compile(r"(\d{8}T\d{6})Z")
 
 
 def _running_cell(wt: Worktree) -> str:
@@ -22,20 +30,33 @@ def _running_cell(wt: Worktree) -> str:
     return " ".join(parts) if parts else "—"
 
 
-def _served_cell(project: Project, wt: Worktree) -> str:
-    """Where this worktree's app reads served data from, and how much is there."""
-    config = project.manifest.served_data
-    if config is None or wt.served_root is None:
-        return "[dim]—[/dim]"
-    root = Path(wt.served_root)
-    tables = (
-        len([c for c in root.iterdir() if c.is_dir() and not c.name.startswith(".")])
-        if root.is_dir()
-        else 0
+def _vintage(root: Path) -> str:
+    """How old the served snapshot is — from the tree it points at, else mtime."""
+    m = _STAMP_RE.search(os.readlink(root) if root.is_symlink() else "")
+    when = (
+        datetime.strptime(m.group(1), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+        if m
+        else datetime.fromtimestamp(root.stat().st_mtime, timezone.utc)
     )
-    if root == farm_dir(config, Path(wt.path)):
-        return f"[green]farm {tables}[/green]"
-    return f"[dim]snapshot {tables}[/dim]"
+    days = (datetime.now(timezone.utc) - when).days
+    return f"{days}d" if days else "<1d"
+
+
+def _served_cell(project: Project, wt: Worktree) -> str:
+    """How fresh the served data this worktree reads is.
+
+    wt neither builds nor wires this tree: the app's own env default points at
+    it and the tenant's snapshot tool publishes it, shared by every worktree on
+    that tenant. All that is left worth showing is the vintage — the staleness
+    a per-worktree farm used to hide.
+    """
+    if project.manifest.served_data is None or wt.tenant_path is None:
+        return "[dim]—[/dim]"
+    root = served_root(project.manifest, wt.tenant_path)
+    if root is None or not root.is_dir():
+        return "[dim]none[/dim]"
+    tables = len([c for c in root.iterdir() if c.is_dir() and not c.name.startswith(".")])
+    return f"[green]{tables}[/green] [dim]·[/dim] {_vintage(root)}"
 
 
 def _branch_cell(branch: str | None) -> str:

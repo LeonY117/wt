@@ -22,4 +22,3 @@ class Worktree(BaseModel):
     db: str | None = None
     tenant: str | None = None
     tenant_path: str | None = None
-    served_root: str | None = None
