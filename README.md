@@ -49,7 +49,6 @@ wt rescue                                  # dry-run report of orphaned Claude s
 wt rescue --apply                          # move sessions + archive remaining state
 wt tenants                                 # list available tenant packages
 wt tenant <shorthand> <name>               # repoint a worktree to a different tenant
-wt served [<shorthand>]                    # rebuild the served-data farm (all worktrees if omitted)
 ```
 
 ## Manifest
@@ -84,13 +83,9 @@ tenant:                           # optional — enables --tenant flag and `wt t
     - ~/dev/projects/whitespace/tenants
     - ~/dev/projects/whitespace/demo-data
 
-served_data:                      # optional — local served-data farm
-  env_var: SERVED_DATA_ROOT       # required; app's served-root env var
-  env_file: .env                  # worktree-relative file the path is written to
-  farm_dir: .local-served/data    # worktree-relative farm location
-  served_suffix: "--served"       # names the served sibling of a tenant package
-  data_subdir: data               # table dir inside package and served sibling
-  require_file: data.parquet      # a dir without this is not a table (null = keep all)
+served_data:                      # optional — the app's served tree, READ ONLY
+  suffix: "--served"              # names the served sibling of a tenant package
+  data_subdir: data               # tables dir inside that sibling
 
 cleanup:
   protected: [demo-main]          # shorthands `wt rm` will refuse
@@ -136,59 +131,36 @@ invalid, or unreadable field produces a loud warning and leaves the identity
 variable untouched. Omitting `identity_env` preserves the original path-only
 behavior. Dotted `identity_source` paths are supported for nested mappings.
 
-### Served-data farm
+### Served data
 
-Some apps read their data from a "served" tree that a production worker
-materialises, kept as a `--served` sibling of the tenant package. That split
-inverts on a dev machine: the package tree holds the real files and the served
-sibling holds only whatever was last refreshed — on brain-app's warwick tenant,
-2 tables out of 25; on the demo tenants, none at all. An app doing the correct
-production thing therefore reads a near-empty dataset locally, and (in
-brain-app's case) tells the user the data isn't available.
+Some apps read their tables from a "served" tree kept as a `--served` sibling of
+the tenant package — in production a pull worker materialises it there. With
+`served_data` configured, `wt status` reports that tree's vintage and table
+count (via each worktree's tenant package, so it needs `import_hints.tenant`
+too), and `wt tenants` hides the sibling so `warwick-prod--served` isn't
+selectable as a tenant beside `warwick-prod`. (A directory merely *ending* in
+the suffix with no package beside it stays listable.)
 
-With `served_data` configured, `wt` fixes the *environment* rather than the app.
-It builds a per-worktree farm of symlinks — **zero bytes copied**, so a 221MB
-table costs nothing — unioning both trees, and writes `env_var` into `env_file`:
+`wt` neither builds nor wires this tree, deliberately. The app's own default
+served root already resolves to `<package><suffix>/<data_subdir>`, and whichever
+tool owns the tenant's snapshot publishes it there — for brain-app, `sys serve`,
+which links the tree straight into its local mirror of the R2 bucket. One
+vintage per tenant, shared by every worktree.
 
-- every table in the package tree, plus
-- every table found *only* in the served snapshot (skipping these would silently
-  shrink the table set rather than grow it), and
-- nothing that lacks `require_file` (tenant `data/` dirs can hold non-table
-  folders, e.g. warwick's `parquets/` of retired snapshots).
+`wt` used to build a per-worktree symlink farm here, unioning the package tree
+over the snapshot. It shipped stale data silently — package copies shadowed
+every table a fresh pull had just updated — and it is gone, along with the
+served-root env var `wt` used to write into each worktree.
 
-Where a table exists in both trees the **package copy wins**, so the farm is one
-coherent vintage. Mixed vintages are worse than slightly stale ones for
-reproducible local testing.
-
-It runs automatically on `wt new` and on `wt tenant` — the latter matters most:
-a repointed worktree whose farm still held the old tenant's tables would serve
-data its `DEPLOYMENT_ROOT` disagrees with. Run `wt served` by hand only when the
-table *set* changes (a `dvc pull` adds one, a refresh retires one); symlinks
-track table *contents* for free.
-
-No farm is built when the served snapshot already covers every package table, or
-when the tenant has no data in either tree. In both cases `env_var` is written
-with the app's own default served path — never left pointing at a farm belonging
-to a previous tenant.
-
-A farm build failure is loud but never fatal: `wt new` finishes provisioning. The
-build only ever creates and removes symlinks; a real file or directory where a
-farm entry belongs aborts with an error rather than being replaced. `wt rm`
-treats the farm as regenerable and won't list it as content at risk.
-
-Two things the project must do itself, since `wt` deliberately touches neither:
-
-- **Ignore the farm.** Add `farm_dir`'s top directory (`.local-served/`) to the
-  repo's committed `.gitignore`. `wt` does not write to `.git/info/exclude` —
-  that file is shared across all worktrees, and a per-worktree tool has no
-  business mutating shared git state.
-- **Respect the app's constraints on `farm_dir`.** brain-app's data plane
-  rejects any served root whose basename isn't `data`, hence the
-  `.local-served/data` default.
-
-Served siblings are also excluded from `wt tenants`, so `warwick-prod--served`
-no longer appears as a selectable tenant beside `warwick-prod`. A directory
-merely *ending* in the suffix with no package beside it stays listable.
+Worktrees provisioned before that still carry the variable, and it outranks the
+app's default. `wt` no longer writes it, so it can no longer correct it either:
+`wt tenant` warns when a worktree's env still points at data fed by the tenant
+it is switching *away* from, but clearing those lines is a one-time job for
+whoever owns the worktrees. A `served_data:` block still carrying the retired
+keys (`env_var`, `env_file`, `farm_dir`, `require_file`, `served_suffix`) is
+rejected rather than ignored — it is the signature of exactly that situation,
+and a stale `served_suffix` would otherwise load as the default and point `wt`
+at the wrong sibling.
 
 ### Placeholders
 

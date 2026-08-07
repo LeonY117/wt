@@ -10,17 +10,30 @@ from .manifest import Manifest
 
 
 def _is_served_sibling(manifest: Manifest, path: Path) -> bool:
-    """True for `<package><served_suffix>` next to a real `<package>`.
+    """True for `<package><suffix>` next to a real `<package>`.
 
     A served snapshot lives beside its package in the same search path, so it
     would otherwise be listed and selectable as a tenant in its own right.
     Requiring the package to exist keeps a genuinely-named tenant listable.
     """
     config = manifest.served_data
-    if config is None or not path.name.endswith(config.served_suffix):
+    if config is None or not path.name.endswith(config.suffix):
         return False
-    package = path.parent / path.name[: -len(config.served_suffix)]
+    package = path.parent / path.name[: -len(config.suffix)]
     return package.is_dir()
+
+
+def served_root(manifest: Manifest, tenant_path: str | Path) -> Path | None:
+    """The served tables dir beside a tenant package — what the app reads.
+
+    Derived, never written: the app's own env default resolves to this same
+    path, and the tenant's snapshot tool publishes it.
+    """
+    config = manifest.served_data
+    if config is None:
+        return None
+    package = Path(tenant_path)
+    return package.parent / f"{package.name}{config.suffix}" / config.data_subdir
 
 
 def list_tenants(manifest: Manifest) -> list[tuple[str, Path]]:

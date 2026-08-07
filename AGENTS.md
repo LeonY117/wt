@@ -13,7 +13,6 @@ src/wt/
   envfile.py        — Minimal .env reader + surgical patcher (never logs values)
   claude_state.py   — Path munging + move-only Claude session/memory rescue
   ports.py          — allocate_port, is_port_bound (uses lsof)
-  served.py         — served-data farm: plan, build (symlinks only), apply
   placeholders.py   — Resolve {db}, {<service>_port}, {tenant_path}, etc.
   tenant.py         — List + resolve tenant packages
   importer.py       — derive_worktrees: walk git + read each worktree's .env files
@@ -22,7 +21,6 @@ src/wt/
     new.py          — wt new (provision)
     rm.py           — wt rm (teardown; mirrors the old bash script)
     rescue.py       — wt rescue orphan scan + apply flow
-    served.py       — wt served + the shared apply/report helper
     tenant.py       — wt tenant + wt tenants
 ```
 
@@ -86,36 +84,23 @@ use top-level `name`. Never derive identity from a package directory name. If
 the field is absent, invalid, or unreadable, warn loudly and leave the identity
 variable untouched. With no `identity_env`, retain the existing path-only flow.
 
-## Served-data farm
+## Served data
 
-Optional, manifest-gated on `served_data:`. Fixes an environment inversion, not
-an app: production materialises every table into the tenant's `--served`
-sibling and keeps pointers in the package clone, while locally the package tree
-holds the real files and the snapshot holds only the last refresh. An app
-reading the served tree — correct in prod — sees almost nothing locally.
+Optional, manifest-gated on `served_data:` — which is READ-ONLY config. `wt`
+reports the served tree's vintage in `wt status` and hides `<package>--served`
+from `wt tenants`. It does not build the tree, and it does not write any
+served-root env var.
 
-`wt` unions both trees into a per-worktree symlink farm and points the app's
-served-root env var at it. Rules:
+That is a deliberate reversal. `wt` used to union the package tree over the
+snapshot into a per-worktree symlink farm, package-wins — which silently
+shadowed every table a fresh data pull had just updated. The tree is now
+published once per tenant by whichever tool owns the snapshot (brain-app:
+`sys serve`, symlinking into its local R2 mirror), at the path the app's own
+env default already resolves to. Nothing to wire per worktree.
 
-- **Symlinks only, never copies.** A real file or directory where a farm entry
-  belongs is a hard error, never something to replace or delete. `_clear_symlinks`
-  refuses to unlink anything that isn't a symlink.
-- **The package copy wins** for a table present in both trees, so the farm is one
-  coherent vintage. Snapshot-only tables are still linked — dropping them shrinks
-  the table set instead of growing it.
-- **The env var is always written, including on the skip path.** A worktree moved
-  to a tenant that needs no farm must fall back to the app's default served path;
-  leaving it pointed at the old farm silently serves the previous tenant's data.
-  This is the single most important invariant in `wt tenant`.
-- **Non-fatal, never silent.** A farm failure warns loudly and lets `wt new`
-  finish. It must never fail quietly: the bug it exists to prevent is itself a
-  silent one.
-- **`wt` never writes git state.** Ignoring `farm_dir` is the project's job via
-  its committed `.gitignore`. Don't reach for `.git/info/exclude` — it is shared
-  across every worktree.
-- `farm_dir`'s basename can be load-bearing for the consuming app (brain-app's
-  data plane rejects a served root not named `data`). It stays manifest-driven;
-  the constraint is documented, not hard-coded.
+If a future project needs local served data, resist rebuilding the farm: the
+fix belongs wherever the snapshot is owned, not in a per-worktree layer no one
+can date.
 
 ## Removal and rescue
 
