@@ -41,7 +41,9 @@ Define a manifest at the project root (`.wt.yaml`) — see [brain-app's manifest
 ```bash
 wt status                                  # table of all worktrees
 wt new <shorthand> [<branch>] [--tenant X] [--type feat] # provision a worktree
+wt new <shorthand> --db-from <db>          # worktree DB = copy of a local DB; never dumped on rm
 wt rm <shorthand>                          # tear down a single worktree
+wt rm <shorthand> --purge                  # no trace: no DB dump, Claude state + branch deleted
 wt rm <shorthand> --force                  # bypass safety refusals (stern confirm)
 wt rm <shorthand> --drop-db=<name>         # explicitly name a non-template DB
 wt rm --auto                               # scan all, prompt y/N per eligible
