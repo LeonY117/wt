@@ -16,7 +16,9 @@ from pathlib import Path
 
 from rich.console import Console
 
-from ..claude_state import rescue_worktree_state
+from ..claude_state import delete_worktree_state, rescue_worktree_state
+from ..pg import copy_source as _copy_source
+from ..pg import db_exists as _db_exists
 from ..placeholders import render_db_name
 from ..project import Project
 from ..types import PRIMARY, Worktree
@@ -85,6 +87,7 @@ class DBRemovalPlan:
     reason: str | None = None
     ownership_warning: str | None = None
     references: list[str] = field(default_factory=list)
+    source: str | None = None  # set when `wt new --db-from` made it: a copy, never dumped
 
 
 def _live_cwd_processes(path: Path) -> list[CwdProcess]:
@@ -345,16 +348,6 @@ def _confirm_force(shorthand: str, reasons: list[str]) -> bool:
     return True
 
 
-def _db_exists(name: str) -> bool:
-    r = subprocess.run(["psql", "-lqt"], capture_output=True, text=True)
-    if r.returncode != 0:
-        return False
-    for line in r.stdout.splitlines():
-        if line.split("|", 1)[0].strip() == name:
-            return True
-    return False
-
-
 def _plan_db_removal(
     project: Project,
     wt: Worktree,
@@ -404,6 +397,7 @@ def _plan_db_removal(
         return plan
 
     plan.should_drop = True
+    plan.source = _copy_source(name)
     return plan
 
 
@@ -503,8 +497,13 @@ def _remove_one(
     assume_yes: bool = False,
     drop_db: str | None = None,
     worktrees: list[Worktree] | None = None,
+    purge: bool = False,
 ) -> bool:
-    """Remove a single worktree + its DB. Returns True on success."""
+    """Remove a single worktree + its DB. Returns True on success.
+
+    `purge` leaves no local trace: no insurance dump, the worktree's Claude state
+    deleted instead of rescued, and the local branch deleted.
+    """
     path = Path(wt.path)
 
     console.print()
@@ -529,7 +528,13 @@ def _remove_one(
                 "worktree's db.name_template.[/bold red]"
             )
             console.print(f"  [yellow]{db_plan.ownership_warning}[/yellow]")
-        if db_plan.should_drop:
+        if db_plan.should_drop and db_plan.source is not None:
+            console.print(
+                f"  database: {db_plan.name} (copy of {db_plan.source} — dropdb, no dump)"
+            )
+        elif db_plan.should_drop and purge:
+            console.print(f"  database: {db_plan.name} (--purge — dropdb, no dump)")
+        elif db_plan.should_drop:
             console.print(f"  database: {db_plan.name} (will dump, then dropdb)")
         else:
             console.print(
@@ -574,7 +579,8 @@ def _remove_one(
             console.print("[dim]skipped[/dim]")
             return False
 
-    if db_plan.should_drop and db_plan.name is not None:
+    needs_dump = db_plan.source is None and not purge
+    if db_plan.should_drop and db_plan.name is not None and needs_dump:
         dump_path, dump_error = _dump_database(db_plan.name)
         if dump_path is None:
             db_plan.should_drop = False
@@ -587,17 +593,28 @@ def _remove_one(
             console.print(f"  [green]✓[/green] database dump saved to {dump_path}")
 
     # Claude Code keys sessions and memory by the worktree's absolute path.
-    # Rescue that state before the directory disappears, even under --force.
-    try:
-        rescued = rescue_worktree_state(
-            source=path,
-            primary=project.primary,
-            project=project.manifest.project or project.primary.name,
-            shorthand=wt.shorthand,
-        )
-    except OSError as exc:
-        err.print(f"[red]Claude state rescue failed; removal aborted:[/red] {exc}")
-        return False
+    # Rescue that state before the directory disappears, even under --force —
+    # unless --purge asked for no trace at all.
+    if purge:
+        try:
+            deleted = delete_worktree_state(source=path, primary=project.primary)
+        except OSError as exc:
+            err.print(f"[red]Claude state delete failed; removal aborted:[/red] {exc}")
+            return False
+        for state_dir in deleted:
+            console.print(f"  [green]✓[/green] deleted Claude state {state_dir.name}")
+        rescued = []
+    else:
+        try:
+            rescued = rescue_worktree_state(
+                source=path,
+                primary=project.primary,
+                project=project.manifest.project or project.primary.name,
+                shorthand=wt.shorthand,
+            )
+        except OSError as exc:
+            err.print(f"[red]Claude state rescue failed; removal aborted:[/red] {exc}")
+            return False
 
     for result in rescued:
         if not result.found:
@@ -637,6 +654,18 @@ def _remove_one(
         else:
             err.print(f"  [yellow]warning:[/yellow] dropdb failed: {rd.stderr.strip()}")
 
+    if purge and wt.branch is not None:
+        rb = subprocess.run(
+            ["git", "branch", "-D", wt.branch],
+            cwd=project.primary,
+            capture_output=True,
+            text=True,
+        )
+        if rb.returncode == 0:
+            console.print(f"  [green]✓[/green] deleted branch {wt.branch}")
+        else:
+            err.print(f"  [yellow]warning:[/yellow] branch delete failed: {rb.stderr.strip()}")
+
     # No registry mutation — once the worktree dir is gone, `derive_worktrees`
     # stops returning it on the next read.
     return True
@@ -648,6 +677,7 @@ def run_one(
     assume_yes: bool = False,
     force: bool = False,
     drop_db: str | None = None,
+    purge: bool = False,
 ) -> int:
     """Remove one specific worktree by shorthand. Same safety checks as --auto.
 
@@ -702,6 +732,7 @@ def run_one(
         assume_yes=assume_yes,
         drop_db=drop_db,
         worktrees=worktrees,
+        purge=purge,
     )
     return 0 if ok else 1
 

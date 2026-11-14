@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from datetime import date
@@ -67,6 +68,40 @@ def rescue_worktree_state(
 ) -> list[RescueResult]:
     """Rescue state launched from a worktree root or any of its subdirectories."""
     source_dir = project_dir(source, home)
+    results: list[RescueResult] = []
+    for candidate in worktree_state_dirs(source=source, primary=primary, home=home):
+        archive_shorthand = shorthand
+        if candidate != source_dir:
+            suffix = candidate.name[len(source_dir.name) + 1 :]
+            archive_shorthand = f"{shorthand}-{suffix}"
+        results.append(
+            rescue_project_dir(
+                source_dir=candidate,
+                primary=primary,
+                project=project,
+                shorthand=archive_shorthand,
+                home=home,
+                on_date=on_date,
+            )
+        )
+    return results
+
+
+def delete_worktree_state(
+    *, source: Path, primary: Path, home: Path | None = None
+) -> list[Path]:
+    """Delete the Claude state of a worktree root and its subdirectories (`wt rm --purge`)."""
+    doomed = worktree_state_dirs(source=source, primary=primary, home=home)
+    for state_dir in doomed:
+        shutil.rmtree(state_dir)
+    return doomed
+
+
+def worktree_state_dirs(
+    *, source: Path, primary: Path, home: Path | None = None
+) -> list[Path]:
+    """Claude project dirs keyed by ``source`` or a subdirectory of it, never another path's."""
+    source_dir = project_dir(source, home)
     candidates: list[Path] = []
     if source_dir.is_dir():
         candidates.append(source_dir)
@@ -91,24 +126,7 @@ def rescue_worktree_state(
             )
         )
         candidates.extend(descendants)
-
-    results: list[RescueResult] = []
-    for candidate in candidates:
-        archive_shorthand = shorthand
-        if candidate != source_dir:
-            suffix = candidate.name[len(source_dir.name) + 1 :]
-            archive_shorthand = f"{shorthand}-{suffix}"
-        results.append(
-            rescue_project_dir(
-                source_dir=candidate,
-                primary=primary,
-                project=project,
-                shorthand=archive_shorthand,
-                home=home,
-                on_date=on_date,
-            )
-        )
-    return results
+    return candidates
 
 
 def _other_existing_path_munges(source: Path, primary: Path) -> set[str]:

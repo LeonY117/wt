@@ -67,6 +67,12 @@ def new(
     skip_migrate: bool = typer.Option(
         False, "--skip-migrate", help="Don't run the db migrate command."
     ),
+    db_from: str | None = typer.Option(
+        None,
+        "--db-from",
+        help="Create the worktree DB as a copy of this local database (e.g. a "
+        "restored sys_<tenant>_prod). The copy is never dumped on rm.",
+    ),
 ) -> None:
     """Provision a new worktree: git worktree add, createdb, env patch, migrate."""
     try:
@@ -77,6 +83,7 @@ def new(
             branch_type=branch_type,
             tenant=tenant,
             skip_migrate=skip_migrate,
+            db_from=db_from,
         )
     except FileNotFoundError as e:
         _die(str(e))
@@ -111,6 +118,12 @@ def rm(
         help="Explicit DB name to drop. Bypasses ownership matching only; never "
         "bypasses another worktree's reference.",
     ),
+    purge: bool = typer.Option(
+        False,
+        "--purge",
+        help="Leave no local trace: no DB dump, Claude state deleted instead of "
+        "rescued, local branch deleted. Safety refusals still apply (see --force).",
+    ),
 ) -> None:
     """Rescue Claude state, then safely remove a worktree and its DB."""
     try:
@@ -124,6 +137,9 @@ def rm(
             if drop_db is not None:
                 _die("--drop-db only applies to a single <shorthand>, not --auto.")
                 return
+            if purge:
+                _die("--purge only applies to a single <shorthand>, not --auto.")
+                return
             rc = rm_cmd.run_auto(Path.cwd())
         else:
             if shorthand is None:
@@ -135,6 +151,7 @@ def rm(
                 assume_yes=yes,
                 force=force,
                 drop_db=drop_db,
+                purge=purge,
             )
     except FileNotFoundError as e:
         _die(str(e))
