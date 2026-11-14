@@ -12,6 +12,8 @@ from rich.console import Console
 
 from ..envfile import patch_env, read_env
 from ..manifest import EnvPatch, Manifest
+from ..pg import create_copy as _create_copy
+from ..pg import db_exists as _db_exists
 from ..placeholders import build_context, render_db_name, resolve
 from ..ports import allocate_port
 from ..project import Project
@@ -34,17 +36,6 @@ def _branch_exists(repo: Path, branch: str) -> bool:
         capture_output=True,
     )
     return r.returncode == 0
-
-
-def _db_exists(name: str) -> bool:
-    r = subprocess.run(["psql", "-lqt"], capture_output=True, text=True)
-    if r.returncode != 0:
-        return False
-    for line in r.stdout.splitlines():
-        db = line.split("|", 1)[0].strip()
-        if db == name:
-            return True
-    return False
 
 
 def _create_db(name: str) -> None:
@@ -165,6 +156,7 @@ def run(
     branch_type: str = "feat",
     tenant: str | None,
     skip_migrate: bool = False,
+    db_from: str | None = None,
 ) -> int:
     project = Project.discover(start)
     manifest = project.manifest
@@ -248,6 +240,19 @@ def run(
 
     # ---- compute DB name ----
     db_name = render_db_name(manifest, shorthand)
+    if db_from is not None:
+        if db_name is None:
+            err.print("[red]error:[/red] --db-from needs db.name_template in .wt.yaml.")
+            return 2
+        if not _db_exists(db_from):
+            err.print(f"[red]error:[/red] source database {db_from!r} does not exist.")
+            return 2
+        if _db_exists(db_name):
+            err.print(
+                f"[red]error:[/red] {db_name} already exists; --db-from would not "
+                "copy over it. Drop it first."
+            )
+            return 2
 
     console.print(
         f"[bold]provisioning[/bold] {shorthand} "
@@ -257,7 +262,8 @@ def run(
     for service, port in ports.items():
         console.print(f"  {service}: :{port}")
     if db_name:
-        console.print(f"  db:      {db_name}")
+        copy = f" (copy of {db_from}, never dumped on rm)" if db_from else ""
+        console.print(f"  db:      {db_name}{copy}")
     if tenant_name:
         console.print(f"  tenant:  {tenant_name} → {tenant_path}")
 
@@ -276,7 +282,10 @@ def run(
         worktree_created = True
 
         # ---- step 2: createdb ----
-        if db_name is not None:
+        if db_name is not None and db_from is not None:
+            _create_copy(db_name, db_from)
+            db_created = True
+        elif db_name is not None:
             if _db_exists(db_name):
                 console.print(
                     f"[yellow]warning:[/yellow] db {db_name} already exists, "
